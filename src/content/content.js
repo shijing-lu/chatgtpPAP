@@ -99,6 +99,7 @@
       if (ack === 'aborted') return { ok: false, reason: 'aborted' };
       if (ack === 'limit') return { ok: false, reason: 'limit' };
       if (ack !== 'ok') return { ok: false, reason: `no-reply(${ack})` };
+      send({ type: MSG.LOG, level: 'info', message: `前提 ${i + 1}/${list.length} 已收到回复，继续` });
     }
 
     // 前提阶段可能顺带出图，等界面彻底静止再给正式任务拍快照，避免把前提的图认成结果
@@ -404,7 +405,12 @@
   /* ---------------- 启动 ---------------- */
 
   async function boot() {
-    await send({ type: MSG.HELLO, url: location.href, convId: CGR.getConvId() });
+    // 后台可能还没把「标签页 → 批次」的登记写完，重试几次避开竞态
+    for (let i = 0; i < 4; i++) {
+      const res = await send({ type: MSG.HELLO, url: location.href, convId: CGR.getConvId() });
+      if (res && res.batchId) break;
+      if (i < 3) await CGR.sleep(1200);
+    }
     setTimeout(loop, 800);
   }
 

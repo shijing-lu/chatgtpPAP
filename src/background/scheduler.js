@@ -41,8 +41,10 @@
         }
       }
 
-      // ② ping 活跃标签页
-      const ids = Object.keys(rt.activeTabs || {}).map(Number);
+      // ② ping 活跃标签页（只处理真正绑定了批次的，没有 batchId 的是历史垃圾记录）
+      const ids = Object.entries(rt.activeTabs || {})
+        .filter(([, v]) => v && v.batchId)
+        .map(([k]) => Number(k));
       const alive = {};
       for (const id of ids) {
         const res = await CGR.withTimeout(tabs.send(id, { type: CGR.MSG.PING }), 5000, null);

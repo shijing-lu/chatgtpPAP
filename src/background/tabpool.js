@@ -152,7 +152,13 @@
 
     // ② 复用用户已经打开、且没被别的批次占用的 ChatGPT 标签页（优先当前活动的那个）
     const all = await chrome.tabs.query({ url: MATCH });
-    const used = new Set(Object.keys(rt.activeTabs || {}).map(Number));
+    // 注意：只排除「确实属于其它批次」的标签页。
+    // 没有 batchId 的条目是历史遗留的僵尸记录，不能因为它占着位置就去开新标签页。
+    const used = new Set(
+      Object.entries(rt.activeTabs || {})
+        .filter(([, v]) => v && v.batchId)
+        .map(([k]) => Number(k))
+    );
     const free = all
       .filter((t) => t && !used.has(t.id) && !t.discarded && !live.includes(t.id))
       .sort((a, b) => (b.active ? 1 : 0) - (a.active ? 1 : 0));

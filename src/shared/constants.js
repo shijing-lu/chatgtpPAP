@@ -120,7 +120,7 @@
     // 前提设定：不产生图片，每条新对话开始前先逐条发送并等待模型回复
     premises: [],
     premiseEnabled: true,
-    premiseTimeoutMs: 120000
+    premiseTimeoutMs: 60000
   };
 
   CGR.LIMITS = {

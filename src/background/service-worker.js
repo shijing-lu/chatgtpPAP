@@ -77,16 +77,21 @@ async function onHello(msg, sender) {
 
     const rt = store.getRuntime();
     const activeTabs = Object.assign({}, rt.activeTabs);
-    // 保留这个 tab 原本服务的批次，别因为刷新就丢归属
-    activeTabs[tabId] = Object.assign({}, activeTabs[tabId], {
-      convId: msg.convId || '',
-      state: 'idle',
-      at: Date.now()
-    });
-    await store.setRuntime({ activeTabs });
+    const existed = activeTabs[tabId] && activeTabs[tabId].batchId;
 
-    const bid = activeTabs[tabId].batchId || '';
-    return { ok: true, cfg: store.getCfg(), batchId: bid, url: msg.url || '' };
+    if (existed) {
+      // 只更新已登记的标签页，保留它的批次归属
+      activeTabs[tabId] = Object.assign({}, activeTabs[tabId], {
+        convId: msg.convId || '',
+        state: 'idle',
+        at: Date.now()
+      });
+      await store.setRuntime({ activeTabs });
+    }
+    // 没登记过的（用户自己打开的 ChatGPT 标签页）不往 activeTabs 里塞，
+    // 否则会被当成执行器去 ping、去注入脚本，日志全是噪音
+
+    return { ok: true, cfg: store.getCfg(), batchId: existed || '', url: msg.url || '' };
   });
 }
 
