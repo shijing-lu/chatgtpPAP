@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:1146px; height:717px; overflow:hidden; }
+  body {
+    font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif;
+    background:#080B14;
+    color:#fff;
+    position:relative;
+  }
+
+  /* 背景光晕 */
+  .glow-a {
+    position:absolute; width:900px; height:900px; left:-260px; top:-380px;
+    background: radial-gradient(circle, rgba(47,107,255,.55), transparent 62%);
+    filter: blur(10px);
+  }
+  .glow-b {
+    position:absolute; width:820px; height:820px; right:-240px; bottom:-420px;
+    background: radial-gradient(circle, rgba(124,77,255,.5), transparent 62%);
+    filter: blur(10px);
+  }
+  .grid {
+    position:absolute; inset:0;
+    background-image:
+      linear-gradient(rgba(255,255,255,.045) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px);
+    background-size: 48px 48px;
+    mask-image: radial-gradient(circle at 30% 40%, #000 35%, transparent 78%);
+    -webkit-mask-image: radial-gradient(circle at 30% 40%, #000 35%, transparent 78%);
+  }
+
+  /* 左侧文字 */
+  .left { position:absolute; left:62px; top:118px; width:620px; z-index:5; }
+
+  .badge {
+    display:inline-flex; align-items:center; gap:8px;
+    background:rgba(47,107,255,.16);
+    border:1px solid rgba(110,150,255,.45);
+    color:#BBD0FF;
+    font-size:19px; font-weight:700; letter-spacing:1px;
+    padding:9px 18px; border-radius:999px;
+  }
+  .badge .dot { width:8px; height:8px; border-radius:50%; background:#54E38E; box-shadow:0 0 12px #54E38E; }
+
+  .brand {
+    margin-top:26px;
+    font-size:38px; font-weight:800; letter-spacing:2px;
+    color:#9FB6E8;
+  }
+
+  .title {
+    margin-top:2px;
+    font-size:112px; font-weight:900; line-height:1.02; letter-spacing:2px;
+    background:linear-gradient(180deg,#FFFFFF 30%, #BFD3FF 100%);
+    -webkit-background-clip:text; background-clip:text; color:transparent;
+    text-shadow:0 0 60px rgba(120,160,255,.25);
+  }
+
+  .sub {
+    margin-top:24px;
+    font-size:31px; font-weight:700; color:#DCE6FF; letter-spacing:1px;
+  }
+  .sub em { font-style:normal; color:#7FA9FF; }
+
+  .chips { margin-top:30px; display:flex; gap:12px; }
+  .chip {
+    font-size:20px; font-weight:700; color:#C9D8FF;
+    background:rgba(255,255,255,.07);
+    border:1px solid rgba(255,255,255,.14);
+    padding:8px 16px; border-radius:10px;
+  }
+
+  .path {
+    margin-top:34px;
+    display:inline-flex; align-items:center; gap:8px;
+    font-family: Consolas, "Courier New", monospace;
+    font-size:17px; color:#7E93BC;
+    background:rgba(255,255,255,.04);
+    border:1px solid rgba(255,255,255,.09);
+    border-radius:10px; padding:10px 16px;
+  }
+  .path b { color:#9FC0FF; font-weight:700; }
+  .path .prompt-mark { color:#54E38E; font-weight:700; }
+  .path .ok { color:#54E38E; font-weight:900; }
+
+  .free {
+    position:absolute; right:56px; top:54px; z-index:8;
+    background:linear-gradient(135deg,#FF6B57,#FF2E63);
+    color:#fff; font-size:21px; font-weight:900; letter-spacing:1px;
+    padding:10px 20px; border-radius:12px;
+    transform:rotate(4deg);
+    box-shadow:0 10px 30px rgba(255,46,99,.38);
+  }
+
+  /* 右侧演示 */
+  .stage { position:absolute; right:26px; top:74px; width:520px; height:600px; z-index:4; }
+
+  .photo {
+    position:absolute; width:186px; height:186px; border-radius:16px;
+    box-shadow:0 24px 50px rgba(0,0,0,.55);
+    border:1px solid rgba(255,255,255,.18);
+    overflow:hidden;
+  }
+  .photo::after {
+    content:''; position:absolute; inset:0;
+    background-image: radial-gradient(circle at 30% 25%, rgba(255,255,255,.35), transparent 45%);
+  }
+  .photo span {
+    position:absolute; left:0; right:0; bottom:0; z-index:3;
+    font-size:9px; font-weight:700; color:rgba(255,255,255,.9);
+    padding:12px 7px 5px; letter-spacing:.3px;
+    background:linear-gradient(transparent, rgba(0,0,0,.6));
+  }
+  .p1 { background:linear-gradient(135deg,#12224F,#2F6BFF 58%,#9BD8FF); transform:rotate(-7deg); left:-6px; top:44px; width:200px; height:200px; }
+  .p2 { background:linear-gradient(135deg,#3A1E6E,#7C4DFF 55%,#FF9AD5); transform:rotate(7deg); left:246px; top:6px; width:172px; height:172px; }
+  .p3 { background:linear-gradient(135deg,#0C3B33,#12B886 55%,#BFF3D4); transform:rotate(-5deg); left:66px; top:268px; width:166px; height:166px; }
+
+  .panel {
+    position:absolute; right:-6px; top:164px; width:326px;
+    background:#0E1424;
+    border:1px solid rgba(255,255,255,.13);
+    border-radius:18px;
+    box-shadow:0 30px 70px rgba(0,0,0,.65);
+    overflow:hidden;
+  }
+  .p-head {
+    display:flex; align-items:center; gap:10px;
+    padding:14px 16px;
+    background:linear-gradient(90deg, rgba(47,107,255,.28), rgba(124,77,255,.18));
+    border-bottom:1px solid rgba(255,255,255,.08);
+  }
+  .logo {
+    width:26px; height:26px; border-radius:8px;
+    background:linear-gradient(135deg,#2F6BFF,#7C4DFF);
+    display:flex; align-items:center; justify-content:center;
+    font-size:11px; font-weight:900;
+  }
+  .p-title { font-size:14px; font-weight:800; }
+  .p-sub { font-size:10px; color:#8FA3C8; margin-top:2px; }
+
+  .rows { padding:10px 12px 6px; }
+  .row {
+    display:flex; align-items:center; gap:8px;
+    padding:8px 8px; border-radius:9px;
+    margin-bottom:6px;
+    background:rgba(255,255,255,.035);
+  }
+  .row .idx { font-size:9px; color:#6F82A6; width:16px; }
+  .row .txt { flex:1; font-size:10.5px; color:#C6D3EA; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .row .st { font-size:9px; font-weight:800; padding:2px 7px; border-radius:999px; }
+  .st.done { background:rgba(84,227,142,.16); color:#54E38E; }
+  .st.run  { background:rgba(47,107,255,.22); color:#8FB4FF; }
+  .st.wait { background:rgba(255,255,255,.08); color:#8FA3C8; }
+
+  .bar-wrap { padding:6px 16px 16px; }
+  .bar { height:6px; border-radius:99px; background:rgba(255,255,255,.1); overflow:hidden; }
+  .bar i { display:block; height:100%; width:72%; border-radius:99px; background:linear-gradient(90deg,#2F6BFF,#7C4DFF); }
+  .bar-txt { margin-top:8px; font-size:10px; color:#7E90B4; display:flex; justify-content:space-between; }
+
+  .strip {
+    position:absolute; left:346px; bottom:38px; z-index:6;
+    display:flex; gap:14px;
+  }
+  .tile {
+    width:94px; height:94px; border-radius:12px;
+    border:1px solid rgba(255,255,255,.16);
+    box-shadow:0 14px 30px rgba(0,0,0,.5);
+    position:relative; overflow:hidden;
+  }
+  .tile::after {
+    content:''; position:absolute; inset:0;
+    background:radial-gradient(circle at 32% 26%, rgba(255,255,255,.34), transparent 48%);
+  }
+  .t1 { background:linear-gradient(135deg,#3A1E6E,#7C4DFF 60%,#FF9AD5); transform:rotate(-4deg); }
+  .t2 { background:linear-gradient(135deg,#0C3B33,#12B886 60%,#BFF3D4); transform:rotate(3deg); }
+  .t3 { background:linear-gradient(135deg,#4A1D1D,#E8590C 60%,#FFD8A8); transform:rotate(-3deg); }
+  .t4 { background:linear-gradient(135deg,#123B5E,#1C7ED6 60%,#A5D8FF); transform:rotate(5deg); }
+
+  .toast-card {
+    position:absolute; right:44px; bottom:52px; z-index:9;
+    display:flex; align-items:center; gap:12px;
+    background:rgba(18,26,44,.92);
+    border:1px solid rgba(84,227,142,.35);
+    border-radius:14px; padding:13px 20px;
+    box-shadow:0 18px 44px rgba(0,0,0,.55);
+  }
+  .tc-ico {
+    width:30px; height:30px; border-radius:50%;
+    background:rgba(84,227,142,.16); color:#54E38E;
+    display:flex; align-items:center; justify-content:center;
+    font-size:16px; font-weight:900;
+  }
+  .tc-t { font-size:13px; font-weight:800; color:#E4ECFF; }
+  .tc-s { font-size:10.5px; color:#8195B8; margin-top:3px; font-family:Consolas,monospace; }
+</style>
+</head>
+<body>
+  <div class="glow-a"></div>
+  <div class="glow-b"></div>
+  <div class="grid"></div>
+
+  <div class="left">
+    <div class="badge"><span class="dot"></span>Chrome 插件 · 不用 API Key</div>
+    <div class="brand">ChatGPT</div>
+    <div class="title">批量生图</div>
+    <div class="sub">提示词丢进去，<em>图自己跑出来</em></div>
+    <div class="chips">
+      <div class="chip">几百张队列</div>
+      <div class="chip">参考图</div>
+      <div class="chip">自动存档</div>
+    </div>
+
+    <div class="path">
+      <span class="prompt-mark">›</span> 存到 <b>下载/AI图/产品图/</b>001_白色耳机.jpg
+      <span class="ok">✓</span>
+    </div>
+  </div>
+
+  <div class="free">免费开源</div>
+
+  <div class="stage">
+    <div class="photo p1"><span>001_白色耳机.jpg</span></div>
+
+    <div class="panel">
+      <div class="p-head">
+        <div class="logo">CG</div>
+        <div>
+          <div class="p-title">批量生图助手</div>
+          <div class="p-sub">产品图 · 12 条</div>
+        </div>
+      </div>
+      <div class="rows">
+        <div class="row"><div class="idx">#1</div><div class="txt">白色耳机，柔和侧光，浅景深</div><div class="st done">已完成</div></div>
+        <div class="row"><div class="idx">#2</div><div class="txt">黑色手表，金属质感</div><div class="st done">已完成</div></div>
+        <div class="row"><div class="idx">#3</div><div class="txt">香水瓶，水波纹背景</div><div class="st run">生成中</div></div>
+        <div class="row"><div class="idx">#4</div><div class="txt">笔记本电脑，俯拍视角</div><div class="st wait">待生成</div></div>
+        <div class="row"><div class="idx">#5</div><div class="txt">机械键盘，霓虹光效</div><div class="st wait">待生成</div></div>
+      </div>
+      <div class="bar-wrap">
+        <div class="bar"><i></i></div>
+        <div class="bar-txt"><span>已保存 9 / 12</span><span>运行中</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="strip">
+    <div class="tile t1"></div>
+    <div class="tile t2"></div>
+    <div class="tile t3"></div>
+    <div class="tile t4"></div>
+  </div>
+
+  <div class="toast-card">
+    <div class="tc-ico">✓</div>
+    <div>
+      <div class="tc-t">已保存到本地</div>
+      <div class="tc-s">AI图/产品图/001_白色耳机.jpg</div>
+    </div>
+  </div>
+</body>
+</html>
