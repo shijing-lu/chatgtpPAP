@@ -5,6 +5,7 @@
   let view = null;
   let tickTimer = 0;
   let listSignature = '';
+  let advSignature = '';
 
   const ACTIVE_STATUS = ['claimed', 'sending', 'generating', 'downloading'];
   function isActiveStatus(s) {
@@ -13,6 +14,10 @@
 
   /* 多选：按队列索引记录，删除后索引会前移，因此每次渲染都要校验一遍 */
   const selected = new Set();
+
+  /* 高级页待提交的参考图（已写入 storage，内容脚本可直接取） */
+  let pendingRefs = [];
+  const MAX_REFS = 4;
 
   function updateSelBar() {
     const items = (view && view.items) || [];
@@ -23,41 +28,6 @@
     const all = $('chkAll');
     all.disabled = selectable.length === 0;
     all.checked = selectable.length > 0 && selectable.every((it) => selected.has(it.i));
-  }
-
-  /* 提示词切分：支持自定义标识符（默认 ---），也兼容一行一条 */
-  function splitPrompts(raw) {
-    const mode = $('splitMode').value;
-    const delim = $('splitDelimiter').value;
-    let parts;
-    if (mode === 'line') {
-      parts = raw.split(/\r?\n/);
-    } else if (mode === 'delimiter') {
-      parts = delim ? raw.split(delim) : raw.split(/\r?\n/);
-    } else {
-      parts = delim && raw.includes(delim) ? raw.split(delim) : raw.split(/\r?\n/);
-    }
-    return parts
-      .map((s) => s.replace(/\s*\r?\n\s*/g, ' ').trim())
-      .filter(Boolean);
-  }
-
-  function currentPrompts() {
-    return splitPrompts($('prompts').value || '');
-  }
-
-  function updateSplitHint() {
-    const n = currentPrompts().length;
-    $('splitHint').textContent = n ? `识别到 ${n} 条提示词` : '识别到 0 条提示词';
-  }
-
-  let splitInited = false;
-  function initSplit(cfg) {
-    if (splitInited) return;
-    splitInited = true;
-    $('splitMode').value = cfg.splitMode || 'auto';
-    $('splitDelimiter').value = cfg.splitDelimiter == null ? '---' : cfg.splitDelimiter;
-    updateSplitHint();
   }
 
   /* ---------------- 通信 ---------------- */
@@ -81,7 +51,27 @@
     el.textContent = msg;
     el.classList.add('show');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => el.classList.remove('show'), 2400);
+    toastTimer = setTimeout(() => el.classList.remove('show'), 2600);
+  }
+
+  /** 两步确认：不用 confirm()，因为侧边栏里的模态框可能不显示 */
+  function armConfirm(btn, onConfirm) {
+    if (btn.dataset.armed === '1') {
+      btn.dataset.armed = '';
+      btn.textContent = btn.dataset.restore || btn.textContent;
+      onConfirm();
+      return true;
+    }
+    btn.dataset.armed = '1';
+    btn.dataset.restore = btn.textContent;
+    btn.textContent = '再点一次确认';
+    setTimeout(() => {
+      if (btn.dataset.armed === '1') {
+        btn.dataset.armed = '';
+        btn.textContent = btn.dataset.restore || btn.textContent;
+      }
+    }, 3500);
+    return false;
   }
 
   /* ---------------- 渲染 ---------------- */
@@ -152,7 +142,8 @@
     return CGR.STATUS_LABEL[status] || status;
   }
 
-  function buildItem(it) {
+  function buildItem(it, opts) {
+    const withCheckbox = !opts || opts.checkbox !== false;
     const row = document.createElement('div');
     row.className = 'item';
 
@@ -160,17 +151,20 @@
     top.className = 'item-top';
 
     const active = isActiveStatus(it.s);
-    const box = document.createElement('input');
-    box.type = 'checkbox';
-    box.className = 'rowchk';
-    box.disabled = active;
-    box.checked = selected.has(it.i);
-    box.title = active ? '正在执行，不能删除' : '选中后可批量删除';
-    box.addEventListener('change', () => {
-      if (box.checked) selected.add(it.i);
-      else selected.delete(it.i);
-      updateSelBar();
-    });
+    if (withCheckbox) {
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.className = 'rowchk';
+      box.disabled = active;
+      box.checked = selected.has(it.i);
+      box.title = active ? '正在执行，不能删除' : '选中后可批量删除';
+      box.addEventListener('change', () => {
+        if (box.checked) selected.add(it.i);
+        else selected.delete(it.i);
+        updateSelBar();
+      });
+      top.append(box);
+    }
 
     const idx = document.createElement('div');
     idx.className = 'idx';
@@ -185,7 +179,15 @@
     badge.className = 'badge ' + badgeClass(it.s);
     badge.textContent = statusLabel(it.s) + (it.a ? ` ${it.a}` : '');
 
-    top.append(box, idx, prompt, badge);
+    top.append(idx, prompt, badge);
+
+    if (it.r > 0) {
+      const ref = document.createElement('span');
+      ref.className = 'ref-badge';
+      ref.textContent = `图 ${it.r}`;
+      ref.title = `带 ${it.r} 张参考图`;
+      top.append(ref);
+    }
 
     const meta = document.createElement('div');
     meta.className = 'item-meta';
@@ -220,7 +222,7 @@
         })
       );
     }
-    if (!['done', 'skipped'].includes(it.s) && !['claimed', 'sending', 'generating', 'downloading'].includes(it.s)) {
+    if (!['done', 'skipped'].includes(it.s) && !isActiveStatus(it.s)) {
       meta.append(
         call('跳过', 'muted', async () => {
           const r = await send(CGR.CMD.SKIP_ITEM, { index: it.i });
@@ -243,24 +245,38 @@
       if (!it || isActiveStatus(it.s)) selected.delete(i);
     }
 
-    const sig = items.map((x) => `${x.i}:${x.s}:${x.a}:${x.f}:${x.e}`).join('|');
+    const sig = items.map((x) => `${x.i}:${x.s}:${x.a}:${x.f}:${x.e}:${x.r}`).join('|');
     if (sig === listSignature) {
       updateSelBar();
-      return;
+    } else {
+      listSignature = sig;
+      const box = $('itemList');
+      box.textContent = '';
+      $('emptyTip').style.display = items.length ? 'none' : 'block';
+      const frag = document.createDocumentFragment();
+      for (const it of items) frag.append(buildItem(it));
+      box.append(frag);
+      updateSelBar();
     }
-    listSignature = sig;
 
-    const box = $('itemList');
-    box.textContent = '';
-    $('emptyTip').style.display = items.length ? 'none' : 'block';
-
-    const frag = document.createDocumentFragment();
-    for (const it of items) frag.append(buildItem(it));
-    box.append(frag);
-    updateSelBar();
+    renderAdvList(items);
   }
 
-  /** 「说在跑但页面没动静」的提示：运行中、没有任务在执行、还有待办、且 15 秒内没有任何任务被领取 */
+  function renderAdvList(items) {
+    const adv = items.filter((it) => it.r > 0);
+    const sig = adv.map((x) => `${x.i}:${x.s}:${x.a}:${x.f}:${x.e}`).join('|');
+    if (sig === advSignature) return;
+    advSignature = sig;
+
+    const box = $('advList');
+    box.textContent = '';
+    $('advEmpty').style.display = adv.length ? 'none' : 'block';
+    const frag = document.createDocumentFragment();
+    for (const it of adv) frag.append(buildItem(it, { checkbox: false }));
+    box.append(frag);
+  }
+
+  /** 「说在跑但页面没动静」的提示 */
   function renderStuck(v) {
     const c = v.counts || {};
     const status = v.status || 'idle';
@@ -300,27 +316,156 @@
     }
   }
 
+  function render(v) {
+    view = v;
+    renderHeader(v);
+    renderProgress(v);
+    renderList(v);
+    renderButtons(v);
+    renderStuck(v);
+    renderLogs(v);
+    renderPremise(v.cfg || CGR.DEFAULTS);
+    if (!settingsDirty) fillSettings(v.cfg || CGR.DEFAULTS);
+  }
+
+  /* ---------------- 队列：输入 + ＋ ---------------- */
+
+  function afterAdd(res, hintEl, inputEl) {
+    if (!res.ok) {
+      toast(res.error || '加入失败');
+      return false;
+    }
+    inputEl.value = '';
+    inputEl.focus();
+    if (hintEl) hintEl.textContent = `已加入，当前队列 ${res.count == null ? '' : res.count + ' 条'}`;
+    return true;
+  }
+
+  async function addSimple() {
+    const text = ($('promptInput').value || '').trim();
+    if (!text) return toast('先输入提示词');
+    const btn = $('btnAddPrompt');
+    btn.disabled = true;
+    const res = await send(CGR.CMD.ADD_ITEM, {
+      prompt: text,
+      batchName: $('batchNameInput').value.trim(),
+      refImages: []
+    });
+    btn.disabled = false;
+    if (afterAdd(res, $('enqueueHint'), $('promptInput'))) toast('已加入队列');
+  }
+
+  async function addAdvanced() {
+    const text = ($('advPrompt').value || '').trim();
+    if (!text) return toast('先输入提示词');
+    const btn = $('btnAddAdvanced');
+    btn.disabled = true;
+    const res = await send(CGR.CMD.ADD_ITEM, {
+      prompt: text,
+      batchName: $('batchNameInput').value.trim(),
+      refImages: pendingRefs.map((r) => ({ id: r.id, name: r.name, type: r.type }))
+    });
+    btn.disabled = false;
+    if (afterAdd(res, $('advHint'), $('advPrompt'))) {
+      pendingRefs = [];
+      renderRefList();
+      toast('已加入队列（含参考图）');
+    }
+  }
+
+  /* ---------------- 参考图 ---------------- */
+
+  function fileToDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(String(fr.result || ''));
+      fr.onerror = () => reject(new Error('读取失败'));
+      fr.readAsDataURL(file);
+    });
+  }
+
+  /** 手机照片动辄 8MB，压到 1600px 再存，避免 storage 与消息体积过大 */
+  async function compressImage(file) {
+    const raw = await fileToDataUrl(file);
+    if (file.size < 1.2 * 1024 * 1024) return { dataUrl: raw, type: file.type, name: file.name };
+
+    try {
+      const bmp = await createImageBitmap(file);
+      const max = 1600;
+      const scale = Math.min(1, max / Math.max(bmp.width, bmp.height));
+      const w = Math.round(bmp.width * scale);
+      const h = Math.round(bmp.height * scale);
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      canvas.getContext('2d').drawImage(bmp, 0, 0, w, h);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
+      return { dataUrl, type: 'image/jpeg', name: file.name.replace(/\.[^.]+$/, '') + '.jpg' };
+    } catch (e) {
+      return { dataUrl: raw, type: file.type, name: file.name };
+    }
+  }
+
+  async function handleFiles(fileList) {
+    const files = Array.from(fileList || []);
+    for (const f of files) {
+      if (!/^image\//.test(f.type || '')) {
+        toast('只支持图片文件');
+        continue;
+      }
+      if (pendingRefs.length >= MAX_REFS) {
+        toast(`最多 ${MAX_REFS} 张参考图`);
+        break;
+      }
+      try {
+        const img = await compressImage(f);
+        const id = 'i' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+        await chrome.storage.local.set({
+          ['img:' + id]: { id, name: img.name, type: img.type, dataUrl: img.dataUrl, createdAt: Date.now() }
+        });
+        pendingRefs.push({ id, name: img.name, type: img.type, dataUrl: img.dataUrl });
+      } catch (e) {
+        toast('图片读取失败');
+      }
+    }
+    $('fileInput').value = '';
+    renderRefList();
+  }
+
+  function renderRefList() {
+    const box = $('refList');
+    box.textContent = '';
+    pendingRefs.forEach((r, i) => {
+      const thumb = document.createElement('div');
+      thumb.className = 'ref-thumb';
+
+      const img = document.createElement('img');
+      img.src = r.dataUrl;
+      img.alt = r.name || '';
+      img.title = r.name || '';
+
+      const del = document.createElement('button');
+      del.className = 'ref-del';
+      del.textContent = '×';
+      del.title = '移除';
+      del.addEventListener('click', () => {
+        pendingRefs.splice(i, 1);
+        renderRefList();
+      });
+
+      thumb.append(img, del);
+      box.append(thumb);
+    });
+
+    $('refHint').textContent = pendingRefs.length
+      ? `已选 ${pendingRefs.length} 张，点 ＋ 加入队列后清空`
+      : '支持多选，随提示词一起入队';
+  }
+
   /* ---------------- 前提设定 ---------------- */
 
   let premiseInited = false;
   let premiseSig = '';
-  let premiseDirty = false;
-
-  function joinPremises(list) {
-    const d = $('splitDelimiter').value || '---';
-    return list.join('\n' + d + '\n');
-  }
-
-  function renderPremiseNote(cfg) {
-    const note = $('premiseNote');
-    const n = (cfg.premises || []).length;
-    if (cfg.premiseEnabled !== false && n > 0) {
-      note.style.display = 'block';
-      note.textContent = `已启用 ${n} 条前提：每条新对话会先发送并等模型回复，再开始生图`;
-    } else {
-      note.style.display = 'none';
-    }
-  }
 
   function renderPremiseList(list) {
     const sig = list.join('\u0001');
@@ -353,16 +498,23 @@
     });
   }
 
+  function renderPremiseNote(cfg) {
+    const note = $('premiseNote');
+    const n = (cfg.premises || []).length;
+    if (cfg.premiseEnabled !== false && n > 0) {
+      note.style.display = 'block';
+      note.textContent = `已启用 ${n} 条前提：每条新对话会先发送并等模型回复，再开始生图`;
+    } else {
+      note.style.display = 'none';
+    }
+  }
+
   function renderPremise(cfg) {
     if (!premiseInited) {
       premiseInited = true;
       $('premiseEnabled').checked = cfg.premiseEnabled !== false;
-      $('premiseText').value = joinPremises(cfg.premises || []);
-      $('premiseHint').textContent = `按与队列相同的分隔规则切分 · 当前 ${(cfg.premises || []).length} 条`;
-    } else if (!premiseDirty && (cfg.premises || []).length && !($('premiseText').value || '').trim()) {
-      // 面板第一次拿到的是默认空配置、随后才读到已保存的前提，这里补一次
-      $('premiseText').value = joinPremises(cfg.premises);
     }
+    $('premiseHint').textContent = `当前 ${(cfg.premises || []).length} 条`;
     renderPremiseList(cfg.premises || []);
     renderPremiseNote(cfg);
   }
@@ -381,26 +533,23 @@
     return true;
   }
 
+  async function addPremise() {
+    const text = ($('premiseInput').value || '').trim();
+    if (!text) return toast('先输入前提内容');
+    const list = (((view && view.cfg) || {}).premises || []).slice();
+    list.push(text);
+    const ok = await savePremises(list, true);
+    if (ok) {
+      $('premiseInput').value = '';
+      toast(`已添加第 ${list.length} 条前提`);
+    }
+  }
+
   async function removePremise(i) {
     const list = (((view && view.cfg) || {}).premises || []).slice();
     list.splice(i, 1);
-    premiseDirty = false;
-    $('premiseText').value = joinPremises(list);
     await savePremises(list, true);
     toast('已删除一条前提');
-  }
-
-  function render(v) {
-    view = v;
-    initSplit(v.cfg || CGR.DEFAULTS);
-    renderHeader(v);
-    renderProgress(v);
-    renderList(v);
-    renderButtons(v);
-    renderStuck(v);
-    renderLogs(v);
-    renderPremise(v.cfg || CGR.DEFAULTS);
-    if (!settingsDirty) fillSettings(v.cfg || CGR.DEFAULTS);
   }
 
   /* ---------------- 设置 ---------------- */
@@ -485,44 +634,6 @@
 
   /* ---------------- 事件 ---------------- */
 
-  async function doEnqueue(prompts) {
-    const btn = $('btnEnqueue');
-    btn.disabled = true;
-    const res = await send(CGR.CMD.ENQUEUE, {
-      prompts,
-      batchName: $('batchNameInput').value.trim()
-    });
-    btn.disabled = false;
-    if (res.ok) {
-      $('enqueueHint').textContent = `已加入 ${res.count} 条（${res.batchName}）`;
-      $('prompts').value = '';
-      updateSplitHint();
-      toast('已加入队列，点「开始」运行');
-    } else {
-      toast(res.error || '加入失败');
-    }
-  }
-
-  /** 两步确认：不用 confirm()，因为侧边栏里的模态框可能不显示 */
-  function armConfirm(btn, onConfirm) {
-    if (btn.dataset.armed === '1') {
-      btn.dataset.armed = '';
-      btn.textContent = btn.dataset.restore || btn.textContent;
-      onConfirm();
-      return true;
-    }
-    btn.dataset.armed = '1';
-    btn.dataset.restore = btn.textContent;
-    btn.textContent = '再点一次确认';
-    setTimeout(() => {
-      if (btn.dataset.armed === '1') {
-        btn.dataset.armed = '';
-        btn.textContent = btn.dataset.restore || btn.textContent;
-      }
-    }, 3500);
-    return false;
-  }
-
   function bind() {
     document.querySelectorAll('.tab').forEach((tab) => {
       tab.addEventListener('click', () => {
@@ -533,114 +644,55 @@
       });
     });
 
-    $('btnEnqueue').addEventListener('click', async () => {
-      const prompts = currentPrompts();
-      if (!prompts.length) return toast('请先粘贴提示词');
-
-      const hasWork = (view && view.counts && view.counts.total > 0) || false;
-      if (hasWork && !armConfirm($('btnEnqueue'), () => doEnqueue(prompts))) {
-        toast('加入新批次会清空当前队列，再点一次确认');
-        return;
-      }
-      if (!hasWork) doEnqueue(prompts);
-    });
-
-    // 分隔方式与标识符
-    $('prompts').addEventListener('input', updateSplitHint);
-    $('splitMode').addEventListener('change', () => {
-      updateSplitHint();
-      send(CGR.CMD.SET_CONFIG, {
-        splitMode: $('splitMode').value,
-        splitDelimiter: $('splitDelimiter').value
-      });
-    });
-    $('splitDelimiter').addEventListener('input', updateSplitHint);
-    $('splitDelimiter').addEventListener('change', () => {
-      send(CGR.CMD.SET_CONFIG, {
-        splitMode: $('splitMode').value,
-        splitDelimiter: $('splitDelimiter').value
-      });
-    });
-
-    // 前提设定
-    $('premiseText').addEventListener('input', () => {
-      premiseDirty = true;
-      const n = splitPrompts($('premiseText').value).length;
-      $('premiseHint').textContent = `按与队列相同的分隔规则切分 · 输入框里共 ${n} 条（未保存）`;
-    });
-
-    $('btnSavePremise').addEventListener('click', async () => {
-      const list = splitPrompts($('premiseText').value);
-      const ok = await savePremises(list, false);
-      if (ok) {
-        premiseDirty = false;
-        $('premiseText').value = joinPremises(list);
-        $('premiseHint').textContent = `按与队列相同的分隔规则切分 · 当前 ${list.length} 条`;
-        $('premiseSaveHint').textContent = '已保存，下次开始任务时生效';
-        setTimeout(() => ($('premiseSaveHint').textContent = ''), 2500);
+    // 简单队列：＋ 与 Ctrl/⌘+Enter
+    $('btnAddPrompt').addEventListener('click', addSimple);
+    $('promptInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        addSimple();
       }
     });
 
-    $('btnClearPremise').addEventListener('click', () => {
-      armConfirm($('btnClearPremise'), async () => {
-        premiseDirty = false;
-        $('premiseText').value = '';
-        await savePremises([], false);
-        $('premiseHint').textContent = '按与队列相同的分隔规则切分 · 当前 0 条';
+    // 高级：＋ 、选图、Ctrl/⌘+Enter
+    $('btnAddAdvanced').addEventListener('click', addAdvanced);
+    $('advPrompt').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        addAdvanced();
+      }
+    });
+
+    $('btnPickImages').addEventListener('click', () => $('fileInput').click());
+    $('fileInput').addEventListener('change', (e) => handleFiles(e.target.files));
+
+    // 拖拽图片到高级输入框
+    const advPane = $('pane-advanced');
+    ['dragover', 'drop'].forEach((evt) => {
+      advPane.addEventListener(evt, (e) => {
+        e.preventDefault();
+        if (evt === 'drop' && e.dataTransfer && e.dataTransfer.files) handleFiles(e.dataTransfer.files);
       });
     });
 
+    // 前提：＋
+    $('btnAddPremise').addEventListener('click', addPremise);
+    $('premiseInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        addPremise();
+      }
+    });
     $('premiseEnabled').addEventListener('change', async () => {
       const list = (((view && view.cfg) || {}).premises || []).slice();
       await savePremises(list, true);
       toast($('premiseEnabled').checked ? '前提已启用' : '前提已停用');
     });
-
     $('premiseNote').addEventListener('click', () => {
       const tab = document.querySelector('.tab[data-tab="premise"]');
       if (tab) tab.click();
     });
 
-    // 多选与批量删除
-    $('chkAll').addEventListener('change', () => {
-      const items = (view && view.items) || [];
-      if ($('chkAll').checked) {
-        for (const it of items) if (!isActiveStatus(it.s)) selected.add(it.i);
-      } else {
-        selected.clear();
-      }
-      listSignature = ''; // 强制重建，让复选框状态同步
-      renderList(view || { items: [] });
-    });
-
-    $('btnDeleteSelected').addEventListener('click', () => {
-      if (!selected.size) return;
-      const count = selected.size;
-      armConfirm($('btnDeleteSelected'), async () => {
-        const indexes = Array.from(selected);
-        const res = await send(CGR.CMD.DELETE_ITEMS, { indexes });
-        if (res.ok) {
-          selected.clear();
-          listSignature = '';
-          toast(`已删除 ${res.deleted} 条${res.skipped ? `，${res.skipped} 条正在执行已保留` : ''}`);
-        } else {
-          toast(res.error || '删除失败');
-        }
-      });
-      toast(`将删除 ${count} 条，再点一次确认`);
-    });
-
-    $('btnFixTabs').addEventListener('click', async () => {
-      const btn = $('btnFixTabs');
-      btn.disabled = true;
-      btn.textContent = '修复中…';
-      const res = await send(CGR.CMD.FIX_TABS);
-      btn.disabled = false;
-      btn.textContent = '立即修复';
-      if (res.ok) toast(`已重新接管 ${res.fixed.length} 个标签页，任务是接着跑的`);
-      else toast(res.error || '修复失败，请手动刷新 ChatGPT 页面');
-    });
-
+    // 控制按钮
     $('btnStart').addEventListener('click', async () => {
       const res = await send(CGR.CMD.START);
       if (!res.ok) toast(res.error || '启动失败');
@@ -667,6 +719,47 @@
       toast(res.ok ? `已清理 ${res.removed || 0} 条` : res.error || '操作失败');
     });
 
+    $('btnFixTabs').addEventListener('click', async () => {
+      const btn = $('btnFixTabs');
+      btn.disabled = true;
+      btn.textContent = '修复中…';
+      const res = await send(CGR.CMD.FIX_TABS);
+      btn.disabled = false;
+      btn.textContent = '立即修复';
+      if (res.ok) toast(`已重新接管 ${res.fixed.length} 个标签页，任务是接着跑的`);
+      else toast(res.error || '修复失败，请手动刷新 ChatGPT 页面');
+    });
+
+    // 多选
+    $('chkAll').addEventListener('change', () => {
+      const items = (view && view.items) || [];
+      if ($('chkAll').checked) {
+        for (const it of items) if (!isActiveStatus(it.s)) selected.add(it.i);
+      } else {
+        selected.clear();
+      }
+      listSignature = '';
+      renderList(view || { items: [] });
+    });
+
+    $('btnDeleteSelected').addEventListener('click', () => {
+      if (!selected.size) return;
+      const count = selected.size;
+      armConfirm($('btnDeleteSelected'), async () => {
+        const indexes = Array.from(selected);
+        const res = await send(CGR.CMD.DELETE_ITEMS, { indexes });
+        if (res.ok) {
+          selected.clear();
+          listSignature = '';
+          toast(`已删除 ${res.deleted} 条${res.skipped ? `，${res.skipped} 条正在执行已保留` : ''}`);
+        } else {
+          toast(res.error || '删除失败');
+        }
+      });
+      toast(`将删除 ${count} 条，再点一次确认`);
+    });
+
+    // 设置
     ['mode', 'concurrency', 'folder', 'template', 'minDelayMs', 'maxDelayMs', 'timeoutMs', 'maxAttempts', 'onNoImage', 'limitCooldownMin'].forEach((id) => {
       const el = $(id);
       if (!el) return;
@@ -748,7 +841,7 @@
     }
   });
 
-  // 限额倒计时需要每秒刷新一次状态胶囊
+  // 限额倒计时与卡住提示需要每秒刷新
   function startTicker() {
     if (tickTimer) return;
     tickTimer = setInterval(() => {
@@ -759,6 +852,7 @@
   }
 
   bind();
+  renderRefList();
   loadView();
   startTicker();
 })();

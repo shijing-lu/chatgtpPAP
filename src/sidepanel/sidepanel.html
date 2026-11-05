@@ -20,30 +20,22 @@
 
     <nav class="tabs">
       <button class="tab active" data-tab="queue">队列</button>
+      <button class="tab" data-tab="advanced">高级</button>
       <button class="tab" data-tab="premise">前提</button>
       <button class="tab" data-tab="settings">设置</button>
-      <button class="tab" data-tab="logs">日志与诊断</button>
+      <button class="tab" data-tab="logs">日志</button>
     </nav>
 
     <main>
-      <!-- 队列 -->
+      <!-- ========== 队列（简单） ========== -->
       <section class="pane active" id="pane-queue">
         <div class="card compose">
-          <label class="lbl" for="prompts">提示词（用标识符分隔，也可一行一条）</label>
-          <textarea id="prompts" placeholder="一只在雨夜霓虹街道上行走的赛博朋克猫，电影感光影&#10;---&#10;水彩风格的江南水乡清晨，薄雾，乌篷船&#10;---&#10;……"></textarea>
-          <div class="split-row">
-            <select id="splitMode" class="input">
-              <option value="auto">自动识别</option>
-              <option value="delimiter">只用标识符</option>
-              <option value="line">只用换行</option>
-            </select>
-            <input id="splitDelimiter" class="input" type="text" placeholder="分隔标识符" />
+          <label class="lbl" for="promptInput">提示词</label>
+          <div class="composer-row">
+            <textarea id="promptInput" rows="3" placeholder="输入一条提示词，点右侧 ＋ 加入队列（Ctrl/⌘ + Enter 也可加入）"></textarea>
+            <button id="btnAddPrompt" class="add-btn" title="加入队列">＋</button>
           </div>
-          <div class="hint" id="splitHint">识别到 0 条提示词</div>
-          <div class="row">
-            <input id="batchNameInput" class="input" type="text" placeholder="批次名（作为子文件夹名）" />
-            <button id="btnEnqueue" class="btn primary">加入队列</button>
-          </div>
+          <input id="batchNameInput" class="input" type="text" placeholder="批次名（作为子文件夹名，可选）" />
           <div class="hint" id="enqueueHint"></div>
           <div class="premise-note" id="premiseNote" style="display: none"></div>
         </div>
@@ -74,32 +66,54 @@
         </div>
 
         <div class="list" id="itemList"></div>
-        <div class="empty" id="emptyTip">还没有任务。粘贴提示词后点「加入队列」。</div>
+        <div class="empty" id="emptyTip">队列为空。在上面输入提示词，点 ＋ 加入。</div>
       </section>
 
-      <!-- 前提设定 -->
+      <!-- ========== 高级（提示词 + 参考图） ========== -->
+      <section class="pane" id="pane-advanced">
+        <div class="card compose">
+          <label class="lbl" for="advPrompt">提示词 + 参考图</label>
+          <div class="composer-row">
+            <textarea id="advPrompt" rows="3" placeholder="输入提示词，可附加 1~4 张参考图，点右侧 ＋ 加入队列"></textarea>
+            <button id="btnAddAdvanced" class="add-btn" title="加入队列">＋</button>
+          </div>
+
+          <div class="row gap">
+            <button id="btnPickImages" class="btn small">＋ 参考图</button>
+            <span class="hint" id="refHint">支持多选，随提示词一起入队</span>
+          </div>
+          <input type="file" id="fileInput" accept="image/*" multiple hidden />
+          <div class="ref-list" id="refList"></div>
+
+          <div class="hint" id="advHint"></div>
+          <div class="hint">参考图会先上传到 ChatGPT 输入框，传完再发提示词；每条任务单独附加，不会被下一条复用。</div>
+        </div>
+
+        <div class="list" id="advList"></div>
+        <div class="empty" id="advEmpty">还没有带参考图的任务。写提示词、加图、点 ＋ 加入队列。</div>
+      </section>
+
+      <!-- ========== 前提设定 ========== -->
       <section class="pane" id="pane-premise">
-        <div class="card">
+        <div class="card compose">
           <div class="pane-head">
             <div>
               <div class="lbl">前提设定（只建立上下文，不生成图片）</div>
-              <div class="hint">每条新对话开始前会先逐条发送这些内容，等模型回复后再开始生图。前提本身不进队列、不下载、不计数。</div>
+              <div class="hint">每条新对话开始前会先逐条发送这些内容，等模型回复后再开始生图。</div>
             </div>
             <label class="chk"><input type="checkbox" id="premiseEnabled" /><span>启用</span></label>
           </div>
-          <textarea id="premiseText" placeholder="例如：&#10;你是一位专业的产品摄影师，接下来所有图片都遵循这个风格：柔和侧光、浅景深、高级灰背景。&#10;---&#10;所有画面不要出现文字和水印。"></textarea>
-          <div class="hint" id="premiseHint">按与队列相同的分隔规则切分 · 当前 0 条</div>
-          <div class="row">
-            <button id="btnSavePremise" class="btn primary">保存前提</button>
-            <button id="btnClearPremise" class="btn ghost">清空</button>
+          <div class="composer-row">
+            <textarea id="premiseInput" rows="2" placeholder="例如：你是一位专业的产品摄影师，接下来所有图片都遵循这个风格：柔和侧光、浅景深。"></textarea>
+            <button id="btnAddPremise" class="add-btn" title="添加前提">＋</button>
           </div>
-          <div class="hint" id="premiseSaveHint"></div>
+          <div class="hint" id="premiseHint">当前 0 条</div>
         </div>
         <div class="list" id="premiseList"></div>
-        <div class="empty" id="premiseEmpty">还没有前提设定。上面填写后点「保存前提」。</div>
+        <div class="empty" id="premiseEmpty">还没有前提设定。上面填写后点 ＋ 添加。</div>
       </section>
 
-      <!-- 设置 -->
+      <!-- ========== 设置 ========== -->
       <section class="pane" id="pane-settings">
         <div class="card">
           <div class="field">
@@ -175,7 +189,7 @@
         </div>
       </section>
 
-      <!-- 日志 -->
+      <!-- ========== 日志 ========== -->
       <section class="pane" id="pane-logs">
         <div class="card">
           <div class="row gap">
