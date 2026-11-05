@@ -6,29 +6,22 @@
   let tickTimer = 0;
   let listSignature = '';
   let advSignature = '';
+  let batchSig = '';
+  let batchDirty = false;
+  let lastBatchId = '';
 
   const ACTIVE_STATUS = ['claimed', 'sending', 'generating', 'downloading'];
-  function isActiveStatus(s) {
-    return ACTIVE_STATUS.includes(s);
-  }
+  const isActiveStatus = (s) => ACTIVE_STATUS.includes(s);
 
-  /* 多选：按队列索引记录，删除后索引会前移，因此每次渲染都要校验一遍 */
+  /* 多选：按队列索引记录，删除后索引会前移，每次渲染都校验 */
   const selected = new Set();
 
-  /* 高级页待提交的参考图（已写入 storage，内容脚本可直接取） */
+  /* 高级页待提交的参考图 */
   let pendingRefs = [];
   const MAX_REFS = 4;
 
-  function updateSelBar() {
-    const items = (view && view.items) || [];
-    const selectable = items.filter((it) => !isActiveStatus(it.s));
-    const count = selected.size;
-    $('selCount').textContent = `已选 ${count} 条 / 共 ${items.length} 条`;
-    $('btnDeleteSelected').disabled = count === 0;
-    const all = $('chkAll');
-    all.disabled = selectable.length === 0;
-    all.checked = selectable.length > 0 && selectable.every((it) => selected.has(it.i));
-  }
+  const cur = () => (view && view.current) || null;
+  const curId = () => (view && view.selectedId) || '';
 
   /* ---------------- 通信 ---------------- */
 
@@ -54,7 +47,6 @@
     toastTimer = setTimeout(() => el.classList.remove('show'), 2600);
   }
 
-  /** 两步确认：不用 confirm()，因为侧边栏里的模态框可能不显示 */
   function armConfirm(btn, onConfirm) {
     if (btn.dataset.armed === '1') {
       btn.dataset.armed = '';
@@ -86,23 +78,78 @@
   };
 
   function renderHeader(v) {
+    const c = v.current;
     const pill = $('statusPill');
-    const status = v.status || 'idle';
+    const status = (c && c.status) || 'idle';
     pill.className = 'status-pill ' + (PILL_CLASS[status] || '');
     let label = CGR.GLOBAL_LABEL[status] || status;
-    if (status === 'limit_waiting' && v.limitUntil > Date.now()) {
-      const left = Math.max(0, Math.ceil((v.limitUntil - Date.now()) / 60000));
-      label = `限额冷却 ${left} 分钟`;
+    if (status === 'limit_waiting' && c.limitUntil > Date.now()) {
+      label = `限额冷却 ${Math.max(0, Math.ceil((c.limitUntil - Date.now()) / 60000))} 分钟`;
     }
-    if (status === 'error' && v.lastError) label = '异常中断';
+    if (status === 'error' && c.lastError) label = '异常中断';
     pill.textContent = label;
-    pill.title = v.lastError || '';
+    pill.title = (c && c.lastError) || '';
 
-    $('batchName').textContent = v.batch && v.batch.name ? `${v.batch.name} · ${v.batch.count} 条` : '尚未建立批次';
+    const running = (v.batches || []).filter((b) => b.status === 'running').length;
+    if (!c) {
+      $('hdrSub').textContent = '还没有批次';
+    } else {
+      $('hdrSub').textContent = `${c.name} · ${c.counts.total} 条${running > 1 ? ` · ${running} 个批次运行中` : ''}`;
+    }
+  }
+
+  function renderBatchBar(v) {
+    const list = v.batches || [];
+    const sel = $('batchSelect');
+    const sig = list.map((b) => `${b.id}:${b.name}:${b.count}:${b.status}`).join('|');
+    if (sig !== batchSig) {
+      batchSig = sig;
+      sel.textContent = '';
+      for (const b of list) {
+        const o = document.createElement('option');
+        o.value = b.id;
+        const mark = b.status === 'running' ? '▶ ' : b.status === 'limit_waiting' ? '⏸ ' : '';
+        o.textContent = `${mark}${b.name}（${b.count}）`;
+        sel.append(o);
+      }
+      if (!list.length) {
+        const o = document.createElement('option');
+        o.value = '';
+        o.textContent = '（无批次，点右侧新建）';
+        sel.append(o);
+      }
+    }
+    sel.value = v.selectedId || '';
+    $('btnDeleteBatch').disabled = !list.length;
+  }
+
+  function renderBatchFields(v) {
+    const c = v.current;
+    if (!c) {
+      $('batchNameInput').value = '';
+      $('batchFolderInput').value = '';
+      $('batchNameInput').disabled = true;
+      $('batchFolderInput').disabled = true;
+      $('btnSaveBatch').disabled = true;
+      return;
+    }
+    $('batchNameInput').disabled = false;
+    $('batchFolderInput').disabled = false;
+    $('btnSaveBatch').disabled = false;
+
+    if (c.id !== lastBatchId) {
+      lastBatchId = c.id;
+      batchDirty = false;
+    }
+    if (!batchDirty) {
+      $('batchNameInput').value = c.name || '';
+      $('batchFolderInput').value = c.folder || '';
+      $('batchFolderInput').placeholder = `留空=基础目录/${c.name || '批次名'}`;
+    }
   }
 
   function renderProgress(v) {
-    const c = v.counts || { total: 0 };
+    const c = (v.current && v.current.counts) || { total: 0 };
     const processed = (c.done || 0) + (c.failed || 0) + (c.needs_review || 0) + (c.skipped || 0);
     const total = c.total || 0;
     const pct = total ? Math.min(100, Math.round((processed / total) * 100)) : 0;
@@ -130,16 +177,12 @@
   }
 
   function badgeClass(status) {
-    if (['claimed', 'sending', 'generating', 'downloading'].includes(status)) return 'active';
+    if (isActiveStatus(status)) return 'active';
     if (status === 'done') return 'done';
     if (status === 'failed') return 'failed';
     if (status === 'needs_review') return 'needs_review';
     if (status === 'skipped') return 'skipped';
     return 'pending';
-  }
-
-  function statusLabel(status) {
-    return CGR.STATUS_LABEL[status] || status;
   }
 
   function buildItem(it, opts) {
@@ -177,7 +220,7 @@
 
     const badge = document.createElement('span');
     badge.className = 'badge ' + badgeClass(it.s);
-    badge.textContent = statusLabel(it.s) + (it.a ? ` ${it.a}` : '');
+    badge.textContent = (CGR.STATUS_LABEL[it.s] || it.s) + (it.a ? ` ${it.a}` : '');
 
     top.append(idx, prompt, badge);
 
@@ -206,10 +249,12 @@
       return b;
     };
 
+    const bid = curId();
+
     if (it.s === 'needs_review' || it.s === 'failed') {
       meta.append(
         call('重试', '', async () => {
-          const r = await send(CGR.CMD.RESET_ITEM, { index: it.i });
+          const r = await send(CGR.CMD.RESET_ITEM, { batchId: bid, index: it.i });
           toast(r.ok ? '已重新加入队列' : r.error || '操作失败');
         })
       );
@@ -217,15 +262,15 @@
     if (it.s === 'pending') {
       meta.append(
         call('跑这条', '', async () => {
-          const r = await send(CGR.CMD.RUN_ONE, { index: it.i });
+          const r = await send(CGR.CMD.RUN_ONE, { batchId: bid, index: it.i });
           toast(r.ok ? '已开始这一条' : r.error || '操作失败');
         })
       );
     }
-    if (!['done', 'skipped'].includes(it.s) && !isActiveStatus(it.s)) {
+    if (!['done', 'skipped'].includes(it.s) && !active) {
       meta.append(
         call('跳过', 'muted', async () => {
-          const r = await send(CGR.CMD.SKIP_ITEM, { index: it.i });
+          const r = await send(CGR.CMD.SKIP_ITEM, { batchId: bid, index: it.i });
           toast(r.ok ? '已跳过' : r.error || '操作失败');
         })
       );
@@ -235,10 +280,19 @@
     return row;
   }
 
-  function renderList(v) {
-    const items = v.items || [];
+  function updateSelBar() {
+    const items = (cur() && cur().items) || [];
+    const selectable = items.filter((it) => !isActiveStatus(it.s));
+    $('selCount').textContent = `已选 ${selected.size} 条 / 共 ${items.length} 条`;
+    $('btnDeleteSelected').disabled = selected.size === 0;
+    const all = $('chkAll');
+    all.disabled = selectable.length === 0;
+    all.checked = selectable.length > 0 && selectable.every((it) => selected.has(it.i));
+  }
 
-    // 索引可能因删除而前移，清掉已不存在或已在执行的选中项
+  function renderList(v) {
+    const items = (v.current && v.current.items) || [];
+
     const byIndex = new Map(items.map((x) => [x.i, x]));
     for (const i of Array.from(selected)) {
       const it = byIndex.get(i);
@@ -264,7 +318,7 @@
 
   function renderAdvList(items) {
     const adv = items.filter((it) => it.r > 0);
-    const sig = adv.map((x) => `${x.i}:${x.s}:${x.a}:${x.f}:${x.e}`).join('|');
+    const sig = adv.map((x) => `${x.i}:${x.s}:${x.a}:${x.f}:${x.e}`).join('|') + '@' + curId();
     if (sig === advSignature) return;
     advSignature = sig;
 
@@ -276,29 +330,32 @@
     box.append(frag);
   }
 
-  /** 「说在跑但页面没动静」的提示 */
   function renderStuck(v) {
-    const c = v.counts || {};
-    const status = v.status || 'idle';
-    const base = v.lastClaimAt || v.startedAt || 0;
-    const idleFor = base ? Date.now() - base : 0;
-    const stuck = status === 'running' && !c.active && c.pending > 0 && idleFor > 15000;
-
+    const c = v.current;
     const bar = $('stuckBar');
+    if (!c) {
+      bar.style.display = 'none';
+      return;
+    }
+    const counts = c.counts || {};
+    const base = c.lastClaimAt || c.startedAt || 0;
+    const idleFor = base ? Date.now() - base : 0;
+    const stuck = c.status === 'running' && !counts.active && counts.pending > 0 && idleFor > 15000;
     bar.style.display = stuck ? 'flex' : 'none';
     if (stuck) {
-      $('stuckText').textContent = `已开始 ${Math.round(idleFor / 1000)} 秒，但 ChatGPT 页面还没开始执行。多数是扩展更新后页面里仍是旧脚本，点「立即修复」即可。`;
+      $('stuckText').textContent = `批次「${c.name}」已开始 ${Math.round(idleFor / 1000)} 秒但页面还没动静。多数是扩展更新后页面里仍是旧脚本，点「立即修复」即可。`;
     }
   }
 
   function renderButtons(v) {
-    const c = v.counts || {};
-    const status = v.status || 'idle';
-    $('btnStart').disabled = !(c.pending > 0) || ['running', 'paused'].includes(status);
+    const c = (v.current && v.current.counts) || {};
+    const status = (v.current && v.current.status) || 'idle';
+    const hasBatch = !!v.current;
+    $('btnStart').disabled = !hasBatch || !(c.pending > 0) || ['running', 'paused'].includes(status);
     $('btnPause').textContent = status === 'paused' ? '继续' : '暂停';
-    $('btnPause').disabled = !['running', 'paused', 'limit_waiting'].includes(status);
-    $('btnStop').disabled = !['running', 'paused', 'limit_waiting'].includes(status);
-    $('btnClearFinished').disabled = !((c.done || 0) + (c.failed || 0) + (c.skipped || 0) > 0);
+    $('btnPause').disabled = !hasBatch || !['running', 'paused', 'limit_waiting'].includes(status);
+    $('btnStop').disabled = !hasBatch || !['running', 'paused', 'limit_waiting'].includes(status);
+    $('btnClearFinished').disabled = !hasBatch || !((c.done || 0) + (c.failed || 0) + (c.skipped || 0) > 0);
   }
 
   function renderLogs(v) {
@@ -319,12 +376,14 @@
   function render(v) {
     view = v;
     renderHeader(v);
+    renderBatchBar(v);
+    renderBatchFields(v);
     renderProgress(v);
     renderList(v);
     renderButtons(v);
     renderStuck(v);
     renderLogs(v);
-    renderPremise(v.cfg || CGR.DEFAULTS);
+    renderPremise(v);
     if (!settingsDirty) fillSettings(v.cfg || CGR.DEFAULTS);
   }
 
@@ -337,20 +396,28 @@
     }
     inputEl.value = '';
     inputEl.focus();
-    if (hintEl) hintEl.textContent = `已加入，当前队列 ${res.count == null ? '' : res.count + ' 条'}`;
+    if (hintEl) hintEl.textContent = `已加入，本批次共 ${res.count} 条`;
     return true;
+  }
+
+  async function ensureBatchId() {
+    if (curId()) return curId();
+    const res = await send(CGR.CMD.BATCH_CREATE, { name: '' });
+    if (!res.ok) {
+      toast(res.error || '新建批次失败');
+      return '';
+    }
+    return res.batch.id;
   }
 
   async function addSimple() {
     const text = ($('promptInput').value || '').trim();
     if (!text) return toast('先输入提示词');
+    const bid = await ensureBatchId();
+    if (!bid) return;
     const btn = $('btnAddPrompt');
     btn.disabled = true;
-    const res = await send(CGR.CMD.ADD_ITEM, {
-      prompt: text,
-      batchName: $('batchNameInput').value.trim(),
-      refImages: []
-    });
+    const res = await send(CGR.CMD.ADD_ITEM, { batchId: bid, prompt: text, refImages: [] });
     btn.disabled = false;
     if (afterAdd(res, $('enqueueHint'), $('promptInput'))) toast('已加入队列');
   }
@@ -358,11 +425,14 @@
   async function addAdvanced() {
     const text = ($('advPrompt').value || '').trim();
     if (!text) return toast('先输入提示词');
+    const bid = await ensureBatchId();
+    if (!bid) return;
+
     const btn = $('btnAddAdvanced');
     btn.disabled = true;
     const res = await send(CGR.CMD.ADD_ITEM, {
+      batchId: bid,
       prompt: text,
-      batchName: $('batchNameInput').value.trim(),
       refImages: pendingRefs.map((r) => ({ id: r.id, name: r.name, type: r.type }))
     });
     btn.disabled = false;
@@ -384,7 +454,6 @@
     });
   }
 
-  /** 手机照片动辄 8MB，压到 1600px 再存，避免 storage 与消息体积过大 */
   async function compressImage(file) {
     const raw = await fileToDataUrl(file);
     if (file.size < 1.2 * 1024 * 1024) return { dataUrl: raw, type: file.type, name: file.name };
@@ -447,7 +516,6 @@
       const del = document.createElement('button');
       del.className = 'ref-del';
       del.textContent = '×';
-      del.title = '移除';
       del.addEventListener('click', () => {
         pendingRefs.splice(i, 1);
         renderRefList();
@@ -462,19 +530,15 @@
       : '支持多选，随提示词一起入队';
   }
 
-  /* ---------------- 前提设定 ---------------- */
+  /* ---------------- 前提（按批次） ---------------- */
 
-  let premiseInited = false;
-  let premiseSig = '';
-
-  function renderPremiseList(list) {
-    const sig = list.join('\u0001');
-    if (sig === premiseSig) return;
-    premiseSig = sig;
-
+  function renderPremise(v) {
+    const c = v.current;
+    const list = (c && c.premises) || [];
     const box = $('premiseList');
     box.textContent = '';
     $('premiseEmpty').style.display = list.length ? 'none' : 'block';
+    $('premiseScope').textContent = c ? `当前批次：${c.name}` : '当前批次：—';
 
     list.forEach((text, i) => {
       const row = document.createElement('div');
@@ -496,39 +560,31 @@
       row.append(idx, t, del);
       box.append(row);
     });
-  }
 
-  function renderPremiseNote(cfg) {
+    $('premiseEnabled').checked = c ? c.premiseEnabled !== false : true;
+    $('premiseEnabled').disabled = !c;
+    $('premiseHint').textContent = `当前 ${list.length} 条`;
+
     const note = $('premiseNote');
-    const n = (cfg.premises || []).length;
-    if (cfg.premiseEnabled !== false && n > 0) {
+    if (c && c.premiseEnabled !== false && list.length) {
       note.style.display = 'block';
-      note.textContent = `已启用 ${n} 条前提：每条新对话会先发送并等模型回复，再开始生图`;
+      note.textContent = `本批次已启用 ${list.length} 条前提：每条新对话会先发送并等模型回复，再开始生图`;
     } else {
       note.style.display = 'none';
     }
   }
 
-  function renderPremise(cfg) {
-    if (!premiseInited) {
-      premiseInited = true;
-      $('premiseEnabled').checked = cfg.premiseEnabled !== false;
-    }
-    $('premiseHint').textContent = `当前 ${(cfg.premises || []).length} 条`;
-    renderPremiseList(cfg.premises || []);
-    renderPremiseNote(cfg);
-  }
-
   async function savePremises(list, silent) {
-    const res = await send(CGR.CMD.SET_CONFIG, {
-      premises: list,
-      premiseEnabled: $('premiseEnabled').checked
+    const bid = curId();
+    if (!bid) return false;
+    const res = await send(CGR.CMD.BATCH_UPDATE, {
+      id: bid,
+      patch: { premises: list, premiseEnabled: $('premiseEnabled').checked }
     });
     if (!res.ok) {
       toast(res.error || '保存失败');
       return false;
     }
-    premiseSig = '';
     if (!silent) toast(list.length ? `已保存 ${list.length} 条前提` : '前提已清空');
     return true;
   }
@@ -536,23 +592,50 @@
   async function addPremise() {
     const text = ($('premiseInput').value || '').trim();
     if (!text) return toast('先输入前提内容');
-    const list = (((view && view.cfg) || {}).premises || []).slice();
+    const list = ((cur() && cur().premises) || []).slice();
     list.push(text);
-    const ok = await savePremises(list, true);
-    if (ok) {
+    if (await savePremises(list, true)) {
       $('premiseInput').value = '';
       toast(`已添加第 ${list.length} 条前提`);
     }
   }
 
   async function removePremise(i) {
-    const list = (((view && view.cfg) || {}).premises || []).slice();
+    const list = ((cur() && cur().premises) || []).slice();
     list.splice(i, 1);
     await savePremises(list, true);
     toast('已删除一条前提');
   }
 
-  /* ---------------- 设置 ---------------- */
+  /* ---------------- 批次 ---------------- */
+
+  async function newBatch() {
+    const res = await send(CGR.CMD.BATCH_CREATE, { name: '' });
+    if (res.ok) {
+      batchDirty = false;
+      toast(`已新建「${res.batch.name}」，可在上方改名`);
+    } else {
+      toast(res.error || '新建失败');
+    }
+  }
+
+  async function saveBatch() {
+    const bid = curId();
+    if (!bid) return;
+    const name = $('batchNameInput').value.trim();
+    const folder = $('batchFolderInput').value.trim();
+    const res = await send(CGR.CMD.BATCH_UPDATE, { id: bid, patch: { name, folder } });
+    if (res.ok) {
+      batchDirty = false;
+      $('batchHint').textContent = '已保存';
+      setTimeout(() => ($('batchHint').textContent = ''), 1800);
+      toast('批次设置已保存');
+    } else {
+      toast(res.error || '保存失败');
+    }
+  }
+
+  /* ---------------- 设置（全局） ---------------- */
 
   let settingsDirty = false;
 
@@ -608,19 +691,15 @@
     for (const r of report) {
       const row = document.createElement('div');
       row.className = 'rep-row';
-
       const mark = document.createElement('div');
       mark.className = 'rep-mark ' + (r.ok ? 'ok' : 'bad');
       mark.textContent = r.ok ? '✓' : '✕';
-
       const label = document.createElement('div');
       label.className = 'rep-label';
       label.textContent = r.label;
-
       const detail = document.createElement('div');
       detail.className = 'rep-detail';
       detail.textContent = r.detail;
-
       row.append(mark, label, detail);
       if (!r.ok && r.hint) {
         const hint = document.createElement('div');
@@ -644,7 +723,41 @@
       });
     });
 
-    // 简单队列：＋ 与 Ctrl/⌘+Enter
+    // 批次切换
+    $('batchSelect').addEventListener('change', async (e) => {
+      batchDirty = false;
+      selected.clear();
+      listSignature = '';
+      advSignature = '';
+      const res = await send(CGR.CMD.BATCH_SELECT, { id: e.target.value });
+      if (!res.ok) toast(res.error || '切换失败');
+    });
+    $('btnNewBatch').addEventListener('click', newBatch);
+    $('btnDeleteBatch').addEventListener('click', () => {
+      const c = cur();
+      if (!c) return;
+      armConfirm($('btnDeleteBatch'), async () => {
+        const res = await send(CGR.CMD.BATCH_DELETE, { id: c.id });
+        if (res.ok) {
+          selected.clear();
+          listSignature = '';
+          batchDirty = false;
+          toast('批次已删除');
+        } else {
+          toast(res.error || '删除失败');
+        }
+      });
+      toast(`将删除「${c.name}」及其全部提示词，再点一次确认`);
+    });
+
+    ['batchNameInput', 'batchFolderInput'].forEach((id) => {
+      $(id).addEventListener('input', () => {
+        batchDirty = true;
+      });
+    });
+    $('btnSaveBatch').addEventListener('click', saveBatch);
+
+    // 加入队列
     $('btnAddPrompt').addEventListener('click', addSimple);
     $('promptInput').addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
@@ -653,7 +766,6 @@
       }
     });
 
-    // 高级：＋ 、选图、Ctrl/⌘+Enter
     $('btnAddAdvanced').addEventListener('click', addAdvanced);
     $('advPrompt').addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
@@ -665,7 +777,6 @@
     $('btnPickImages').addEventListener('click', () => $('fileInput').click());
     $('fileInput').addEventListener('change', (e) => handleFiles(e.target.files));
 
-    // 拖拽图片到高级输入框
     const advPane = $('pane-advanced');
     ['dragover', 'drop'].forEach((evt) => {
       advPane.addEventListener(evt, (e) => {
@@ -674,7 +785,7 @@
       });
     });
 
-    // 前提：＋
+    // 前提
     $('btnAddPremise').addEventListener('click', addPremise);
     $('premiseInput').addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
@@ -683,39 +794,46 @@
       }
     });
     $('premiseEnabled').addEventListener('change', async () => {
-      const list = (((view && view.cfg) || {}).premises || []).slice();
+      const list = ((cur() && cur().premises) || []).slice();
       await savePremises(list, true);
-      toast($('premiseEnabled').checked ? '前提已启用' : '前提已停用');
+      toast($('premiseEnabled').checked ? '本批次前提已启用' : '本批次前提已停用');
     });
     $('premiseNote').addEventListener('click', () => {
       const tab = document.querySelector('.tab[data-tab="premise"]');
       if (tab) tab.click();
     });
 
-    // 控制按钮
+    // 运行控制
     $('btnStart').addEventListener('click', async () => {
-      const res = await send(CGR.CMD.START);
+      const bid = curId();
+      if (!bid) return toast('请先新建批次');
+      const res = await send(CGR.CMD.START, { batchId: bid });
       if (!res.ok) toast(res.error || '启动失败');
       else if (res.warning) toast(res.warning);
-      else toast('已开始，请保持 ChatGPT 标签页运行');
+      else toast('已开始，这个批次会用自己的窗口运行');
     });
 
     $('btnPause').addEventListener('click', async () => {
-      const paused = view && view.status === 'paused';
-      const res = await send(paused ? CGR.CMD.RESUME : CGR.CMD.PAUSE);
+      const c = cur();
+      if (!c) return;
+      const res = await send(c.status === 'paused' ? CGR.CMD.RESUME : CGR.CMD.PAUSE, { batchId: c.id });
       if (!res.ok) toast(res.error || '操作失败');
     });
 
     $('btnStop').addEventListener('click', () => {
+      const c = cur();
+      if (!c) return;
       armConfirm($('btnStop'), async () => {
-        const res = await send(CGR.CMD.STOP);
+        const res = await send(CGR.CMD.STOP, { batchId: c.id });
         if (!res.ok) toast(res.error || '操作失败');
         else toast('已停止');
       });
     });
 
     $('btnClearFinished').addEventListener('click', async () => {
-      const res = await send(CGR.CMD.CLEAR_FINISHED);
+      const c = cur();
+      if (!c) return;
+      const res = await send(CGR.CMD.CLEAR_FINISHED, { batchId: c.id });
       toast(res.ok ? `已清理 ${res.removed || 0} 条` : res.error || '操作失败');
     });
 
@@ -723,31 +841,31 @@
       const btn = $('btnFixTabs');
       btn.disabled = true;
       btn.textContent = '修复中…';
-      const res = await send(CGR.CMD.FIX_TABS);
+      const res = await send(CGR.CMD.FIX_TABS, { batchId: curId() });
       btn.disabled = false;
       btn.textContent = '立即修复';
-      if (res.ok) toast(`已重新接管 ${res.fixed.length} 个标签页，任务是接着跑的`);
-      else toast(res.error || '修复失败，请手动刷新 ChatGPT 页面');
+      if (res.ok) toast(`已重新接管 ${res.fixed.length} 个标签页，任务接着跑`);
+      else toast(res.error || '修复失败，请手动刷新该批次的窗口');
     });
 
     // 多选
     $('chkAll').addEventListener('change', () => {
-      const items = (view && view.items) || [];
+      const items = (cur() && cur().items) || [];
       if ($('chkAll').checked) {
         for (const it of items) if (!isActiveStatus(it.s)) selected.add(it.i);
       } else {
         selected.clear();
       }
       listSignature = '';
-      renderList(view || { items: [] });
+      renderList(view || { current: null });
     });
 
     $('btnDeleteSelected').addEventListener('click', () => {
       if (!selected.size) return;
-      const count = selected.size;
+      const n = selected.size;
+      const bid = curId();
       armConfirm($('btnDeleteSelected'), async () => {
-        const indexes = Array.from(selected);
-        const res = await send(CGR.CMD.DELETE_ITEMS, { indexes });
+        const res = await send(CGR.CMD.DELETE_ITEMS, { batchId: bid, indexes: Array.from(selected) });
         if (res.ok) {
           selected.clear();
           listSignature = '';
@@ -756,7 +874,7 @@
           toast(res.error || '删除失败');
         }
       });
-      toast(`将删除 ${count} 条，再点一次确认`);
+      toast(`将删除 ${n} 条，再点一次确认`);
     });
 
     // 设置
@@ -774,8 +892,7 @@
     });
 
     $('btnSaveCfg').addEventListener('click', async () => {
-      const cfg = collectSettings();
-      const res = await send(CGR.CMD.SET_CONFIG, cfg);
+      const res = await send(CGR.CMD.SET_CONFIG, collectSettings());
       if (res.ok) {
         settingsDirty = false;
         $('cfgHint').textContent = '已保存';
@@ -794,7 +911,7 @@
     $('btnSelfcheck').addEventListener('click', async () => {
       $('btnSelfcheck').disabled = true;
       $('btnSelfcheck').textContent = '检测中…';
-      const res = await send(CGR.CMD.SELFCHECK);
+      const res = await send(CGR.CMD.SELFCHECK, {});
       $('btnSelfcheck').disabled = false;
       $('btnSelfcheck').textContent = '运行自检';
       if (!res.ok) return toast(res.error || '自检失败');
@@ -802,7 +919,7 @@
     });
 
     $('btnExportLogs').addEventListener('click', async () => {
-      const res = await send(CGR.CMD.EXPORT_LOGS);
+      const res = await send(CGR.CMD.EXPORT_LOGS, { batchId: curId() });
       if (!res.ok) return toast('导出失败');
       const blob = new Blob([JSON.stringify(res, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
@@ -817,22 +934,17 @@
 
   /* ---------------- 启动 ---------------- */
 
+  const EMPTY_VIEW = {
+    batches: [],
+    selectedId: '',
+    current: null,
+    cfg: CGR.DEFAULTS,
+    logs: []
+  };
+
   async function loadView() {
     const data = await chrome.storage.local.get('view');
-    if (data.view) {
-      render(data.view);
-    } else {
-      render({
-        status: 'idle',
-        limitUntil: 0,
-        counts: { total: 0, pending: 0, active: 0, done: 0, failed: 0, needs_review: 0, skipped: 0 },
-        items: [],
-        logs: [],
-        batch: { name: '', count: 0 },
-        cfg: CGR.DEFAULTS
-      });
-      $('emptyTip').style.display = 'block';
-    }
+    render(data.view || EMPTY_VIEW);
   }
 
   chrome.storage.onChanged.addListener((changes, area) => {
@@ -841,13 +953,14 @@
     }
   });
 
-  // 限额倒计时与卡住提示需要每秒刷新
   function startTicker() {
     if (tickTimer) return;
     tickTimer = setInterval(() => {
       if (!view) return;
-      if (view.status === 'limit_waiting') renderHeader(view);
-      if (view.status === 'running') renderStuck(view);
+      const c = view.current;
+      if (!c) return;
+      if (c.status === 'limit_waiting') renderHeader(view);
+      if (c.status === 'running') renderStuck(view);
     }, 1000);
   }
 

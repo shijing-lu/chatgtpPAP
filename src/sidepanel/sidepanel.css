@@ -812,3 +812,30 @@ select.input {
   outline: 2px dashed var(--primary);
   outline-offset: -6px;
 }
+
+/* ---------- 批次栏 ---------- */
+.batch-bar {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 8px 12px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+.batch-select {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  padding: 6px 8px;
+}
+
+.batch-bar .btn.small {
+  padding: 6px 8px;
+}
+
+/* 五个标签页时收紧一点内边距 */
+.tabs .tab {
+  padding: 7px 9px;
+}

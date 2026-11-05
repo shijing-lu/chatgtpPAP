@@ -1,6 +1,9 @@
 /* 定时任务：每 30 秒扫描一次。
- * 作用：① 给所有活跃标签页发 PING/EVALUATE（绕过后台标签页的定时器节流）
- *      ② 续租 / 回收失联标签页的租约 ③ 限额冷却到点自动恢复。 */
+ * ① 批次限额冷却到点自动恢复
+ * ② 给所有活跃标签页发 PING/EVALUATE（绕过后台标签页的定时器节流）
+ * ③ 续租 / 回收失联标签页的租约
+ * ④ 某个批次「显示运行中却没动静」时自动重建页面连接
+ */
 (function (root) {
   const CGR = root.CGR;
   const store = root.CGR_STORE;
@@ -8,10 +11,11 @@
   const tabs = root.CGR_TABS;
   const orch = root.CGR_ORCH;
   const G = CGR.GLOBAL;
+  const S = CGR.STATUS;
 
   const ALARM = 'cgr-scan';
   const misses = new Map(); // tabId -> 连续 ping 失败次数
-  let lastHealAt = 0;
+  const healAt = new Map(); // batchId -> 上次自愈时间
 
   function ensure() {
     try {
@@ -26,12 +30,18 @@
       await store.ensureLoaded();
       const rt = store.getRuntime();
 
-      if (rt.status === G.LIMIT_WAITING && rt.limitUntil && Date.now() >= rt.limitUntil) {
-        await store.setRuntime({ status: G.RUNNING, limitUntil: 0 });
-        store.addLog('info', '限额冷却结束，自动恢复执行');
-        await orch.wakeAll();
+      // ① 限额冷却到点 → 自动恢复
+      for (const b of store.listBatches()) {
+        if (b.status === G.LIMIT_WAITING && b.limitUntil && Date.now() >= b.limitUntil) {
+          b.status = G.RUNNING;
+          b.limitUntil = 0;
+          await store.putBatch(b);
+          store.addLog('info', `批次「${b.name}」限额冷却结束，自动恢复执行`);
+          await orch.wakeBatch(b.id);
+        }
       }
 
+      // ② ping 活跃标签页
       const ids = Object.keys(rt.activeTabs || {}).map(Number);
       const alive = {};
       for (const id of ids) {
@@ -42,7 +52,6 @@
           await lease.renewByTab(id);
           await CGR.withTimeout(tabs.send(id, { type: CGR.MSG.EVALUATE }), 5000, null);
         } else {
-          // 连续两次失联才回收，避免页面瞬时卡顿导致误判
           const n = (misses.get(id) || 0) + 1;
           misses.set(id, n);
           if (n >= 2) {
@@ -54,52 +63,39 @@
           }
         }
       }
-
       if (ids.length) await store.setRuntime({ activeTabs: alive });
 
-      // 自愈：显示「运行中」却长时间没有任何任务被领走，且没有任务在执行 —— 页面连接断了。
-      // 注意要用「当前所有 ChatGPT 标签页」而不是 activeTabs：失联的标签页刚才已经被上面的
-      // ping 循环从 activeTabs 里剔掉了，用它就正好漏掉需要修的那些。
-      const rtNow = store.getRuntime();
-      if (rtNow.status === G.RUNNING) {
-        const items = store.allItems();
+      // ③ 自愈：批次在跑但没有任务被执行、还有待办
+      for (const b of store.listBatches()) {
+        if (b.status !== G.RUNNING) continue;
+        const items = store.getItems(b.id);
         const anyActive = items.some((it) => lease.ACTIVE.includes(it.status));
-        const anyPending = items.some((it) => it.status === CGR.STATUS.PENDING);
-        const idleFor = Date.now() - (rtNow.lastClaimAt || rtNow.startedAt || Date.now());
+        const anyPending = items.some((it) => it.status === S.PENDING);
+        const idleFor = Date.now() - (b.lastClaimAt || b.startedAt || Date.now());
+        if (anyActive || !anyPending || idleFor < 20000) continue;
+        if (Date.now() - (healAt.get(b.id) || 0) < 45000) continue;
+        healAt.set(b.id, Date.now());
 
-        if (!anyActive && anyPending && idleFor > 20000 && Date.now() - lastHealAt > 45000) {
-          lastHealAt = Date.now();
-          const candidates = await tabs.usableTabs();
-          const activeTabs = Object.assign({}, rtNow.activeTabs);
-          let injected = 0;
-          let alreadyAlive = 0;
-
-          for (const t of candidates) {
-            if (await tabs.ping(t.id)) {
-              alreadyAlive += 1;
-              if (!activeTabs[t.id]) activeTabs[t.id] = { convId: '', state: 'idle', at: Date.now() };
-              continue;
-            }
-            // 扩展重载后旧脚本已死，重新注入一份新的
-            if (await tabs.ensureContentScript(t.id)) {
-              injected += 1;
-              activeTabs[t.id] = Object.assign({}, activeTabs[t.id], { state: 'idle', at: Date.now() });
-              await tabs.send(t.id, { type: CGR.MSG.WAKE });
-            }
-          }
-
-          if (injected) {
-            await store.setRuntime({ activeTabs });
-            store.addLog('warn', `检测到页面连接已断开，已自动重建 ${injected} 个标签页，任务继续`);
-          } else if (alreadyAlive) {
-            store.addLog('warn', '任务已开始但页面没有领取任务：请确认 ChatGPT 标签页停在对话页面，必要时刷新一次');
-          } else {
-            store.addLog('error', '检测到页面失联且无法自动恢复，请手动刷新 ChatGPT 页面后点「开始」');
+        const cur = store.getRuntime();
+        let injected = 0;
+        for (const [tid, info] of Object.entries(cur.activeTabs || {})) {
+          if (!info || info.batchId !== b.id) continue;
+          const id = Number(tid);
+          if (await tabs.ping(id)) continue;
+          if (await tabs.ensureContentScript(id)) {
+            injected += 1;
+            await tabs.send(id, { type: CGR.MSG.WAKE });
           }
         }
+        if (injected) {
+          store.addLog('warn', `批次「${b.name}」页面连接已断开，已自动重建 ${injected} 个标签页`);
+        } else {
+          store.addLog('warn', `批次「${b.name}」已开始但页面没有领取任务，请刷新它的窗口后点「继续」`);
+        }
       }
+
       await lease.sweepExpired();
-      await orch.maybeFinish();
+      for (const b of store.listBatches()) await orch.maybeFinish(b.id);
       await store.publishView();
     });
   }

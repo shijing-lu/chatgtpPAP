@@ -12,11 +12,18 @@
         <div class="logo">CG</div>
         <div>
           <div class="hdr-title">批量生图助手</div>
-          <div class="hdr-sub" id="batchName">尚未建立批次</div>
+          <div class="hdr-sub" id="hdrSub">还没有批次</div>
         </div>
       </div>
       <div class="status-pill" id="statusPill">空闲</div>
     </header>
+
+    <!-- 批次切换 -->
+    <div class="batch-bar">
+      <select id="batchSelect" class="input batch-select" title="切换批次"></select>
+      <button id="btnNewBatch" class="btn small" title="新建批次">＋ 新建</button>
+      <button id="btnDeleteBatch" class="btn small danger" title="删除当前批次">删除</button>
+    </div>
 
     <nav class="tabs">
       <button class="tab active" data-tab="queue">队列</button>
@@ -27,15 +34,31 @@
     </nav>
 
     <main>
-      <!-- ========== 队列（简单） ========== -->
+      <!-- ========== 队列 ========== -->
       <section class="pane active" id="pane-queue">
+        <div class="card">
+          <div class="field two">
+            <div>
+              <label class="lbl" for="batchNameInput">批次名称</label>
+              <input id="batchNameInput" class="input" type="text" placeholder="例如：产品图-客户A" />
+            </div>
+            <div>
+              <label class="lbl" for="batchFolderInput">下载子目录</label>
+              <input id="batchFolderInput" class="input" type="text" placeholder="留空=基础目录/批次名" />
+            </div>
+          </div>
+          <div class="row">
+            <button id="btnSaveBatch" class="btn primary small">保存批次设置</button>
+            <span class="hint" id="batchHint"></span>
+          </div>
+        </div>
+
         <div class="card compose">
           <label class="lbl" for="promptInput">提示词</label>
           <div class="composer-row">
-            <textarea id="promptInput" rows="3" placeholder="输入一条提示词，点右侧 ＋ 加入队列（Ctrl/⌘ + Enter 也可加入）"></textarea>
-            <button id="btnAddPrompt" class="add-btn" title="加入队列">＋</button>
+            <textarea id="promptInput" rows="3" placeholder="输入一条提示词，点右侧 ＋ 加入当前批次（Ctrl/⌘ + Enter 亦可）"></textarea>
+            <button id="btnAddPrompt" class="add-btn" title="加入当前批次">＋</button>
           </div>
-          <input id="batchNameInput" class="input" type="text" placeholder="批次名（作为子文件夹名，可选）" />
           <div class="hint" id="enqueueHint"></div>
           <div class="premise-note" id="premiseNote" style="display: none"></div>
         </div>
@@ -66,16 +89,16 @@
         </div>
 
         <div class="list" id="itemList"></div>
-        <div class="empty" id="emptyTip">队列为空。在上面输入提示词，点 ＋ 加入。</div>
+        <div class="empty" id="emptyTip">这个批次还没有提示词。在上面输入一条，点 ＋ 加入。</div>
       </section>
 
-      <!-- ========== 高级（提示词 + 参考图） ========== -->
+      <!-- ========== 高级 ========== -->
       <section class="pane" id="pane-advanced">
         <div class="card compose">
           <label class="lbl" for="advPrompt">提示词 + 参考图</label>
           <div class="composer-row">
-            <textarea id="advPrompt" rows="3" placeholder="输入提示词，可附加 1~4 张参考图，点右侧 ＋ 加入队列"></textarea>
-            <button id="btnAddAdvanced" class="add-btn" title="加入队列">＋</button>
+            <textarea id="advPrompt" rows="3" placeholder="输入提示词，可附加 1~4 张参考图，点右侧 ＋ 加入当前批次"></textarea>
+            <button id="btnAddAdvanced" class="add-btn" title="加入当前批次">＋</button>
           </div>
 
           <div class="row gap">
@@ -90,16 +113,16 @@
         </div>
 
         <div class="list" id="advList"></div>
-        <div class="empty" id="advEmpty">还没有带参考图的任务。写提示词、加图、点 ＋ 加入队列。</div>
+        <div class="empty" id="advEmpty">当前批次还没有带参考图的任务。</div>
       </section>
 
-      <!-- ========== 前提设定 ========== -->
+      <!-- ========== 前提 ========== -->
       <section class="pane" id="pane-premise">
         <div class="card compose">
           <div class="pane-head">
             <div>
               <div class="lbl">前提设定（只建立上下文，不生成图片）</div>
-              <div class="hint">每条新对话开始前会先逐条发送这些内容，等模型回复后再开始生图。</div>
+              <div class="hint" id="premiseScope">当前批次：—</div>
             </div>
             <label class="chk"><input type="checkbox" id="premiseEnabled" /><span>启用</span></label>
           </div>
@@ -108,12 +131,13 @@
             <button id="btnAddPremise" class="add-btn" title="添加前提">＋</button>
           </div>
           <div class="hint" id="premiseHint">当前 0 条</div>
+          <div class="hint">每个批次的前提互不影响；切换批次后这里编辑的就是那个批次的前提。</div>
         </div>
         <div class="list" id="premiseList"></div>
-        <div class="empty" id="premiseEmpty">还没有前提设定。上面填写后点 ＋ 添加。</div>
+        <div class="empty" id="premiseEmpty">这个批次还没有前提设定。</div>
       </section>
 
-      <!-- ========== 设置 ========== -->
+      <!-- ========== 设置（全局） ========== -->
       <section class="pane" id="pane-settings">
         <div class="card">
           <div class="field">
@@ -123,19 +147,19 @@
               <option value="single-chat">同一对话连续生成</option>
               <option value="parallel">多对话并行</option>
             </select>
-            <div class="hint">新开对话可避免前面生成的图影响后面，风格更稳定。</div>
+            <div class="hint">所有批次共用。每个批次都有自己独立的窗口，互不干扰。</div>
           </div>
 
           <div class="field" id="concurrencyField">
             <label class="lbl" for="concurrency">并行标签页数</label>
             <input id="concurrency" class="input" type="number" min="1" max="3" step="1" />
-            <div class="hint">仅在「多对话并行」下生效，上限 3。并发越高越容易触发限额与风控。</div>
+            <div class="hint">仅「多对话并行」生效，指单个批次内开几个标签页。</div>
           </div>
 
           <div class="field">
-            <label class="lbl" for="folder">下载子文件夹</label>
+            <label class="lbl" for="folder">基础下载目录</label>
             <input id="folder" class="input" type="text" placeholder="chatgpt-images" />
-            <div class="hint">相对于浏览器下载目录，可写多级如 <code>AI图/客户A</code>。扩展无法写入绝对路径。</div>
+            <div class="hint">批次没单独指定目录时，存到 <code>基础目录/批次名/</code>。</div>
           </div>
 
           <div class="field">

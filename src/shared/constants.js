@@ -77,8 +77,11 @@
 
   // side panel -> service worker 命令
   CGR.CMD = {
+    BATCH_CREATE: 'BATCH_CREATE',
+    BATCH_UPDATE: 'BATCH_UPDATE',
+    BATCH_DELETE: 'BATCH_DELETE',
+    BATCH_SELECT: 'BATCH_SELECT',
     ADD_ITEM: 'ADD_ITEM',
-    ENQUEUE: 'ENQUEUE',
     START: 'START',
     PAUSE: 'PAUSE',
     RESUME: 'RESUME',

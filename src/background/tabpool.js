@@ -59,55 +59,55 @@
     return await ping(tabId);
   }
 
-  /** 确保有 desired 个可执行标签页，返回 tabId 数组 */
-  async function ensureTabs(desired) {
+  /**
+   * 为某个批次准备它自己的窗口与标签页。
+   * 一个批次 = 一个独立窗口，互不干扰；窗口 id 记在批次上，下次直接复用。
+   */
+  async function ensureBatchTabs(batch, desired, focus) {
     const want = Math.max(1, Math.min(desired || 1, CGR.LIMITS.hardMaxConcurrency));
-    const usable = await usableTabs();
+    let windowId = batch.windowId == null ? null : batch.windowId;
+    let tabsIn = [];
 
-    if (want === 1) {
-      if (usable.length) {
-        await harden(usable[0].id);
-        return [usable[0].id];
-      }
-      const tab = await chrome.tabs.create({ url: 'https://chatgpt.com/', active: true });
-      await harden(tab.id);
-      return [tab.id];
-    }
-
-    // 并行：需要独立窗口，避免污染用户当前窗口
-    if (runnerWindowId != null) {
+    if (windowId != null) {
       try {
-        const winTabs = await chrome.tabs.query({ windowId: runnerWindowId, url: MATCH });
-        const alive = winTabs.filter((t) => !t.discarded);
-        if (alive.length >= want) return alive.slice(0, want).map((t) => t.id);
-        const ids = alive.map((t) => t.id);
-        for (let i = alive.length; i < want; i++) {
-          const t = await chrome.tabs.create({ windowId: runnerWindowId, url: 'https://chatgpt.com/', active: false });
-          await harden(t.id);
-          ids.push(t.id);
-        }
-        return ids;
+        await chrome.windows.get(windowId);
+        tabsIn = await chrome.tabs.query({ windowId, url: MATCH });
       } catch (e) {
-        runnerWindowId = null;
+        windowId = null;
+        tabsIn = [];
       }
     }
 
-    const first = await chrome.windows.create({
-      url: 'https://chatgpt.com/',
-      focused: false,
-      type: 'normal',
-      width: 1000,
-      height: 820
-    });
-    runnerWindowId = first.id;
-    const ids = (first.tabs || []).map((t) => t.id).filter((x) => x != null);
+    if (windowId == null) {
+      const win = await chrome.windows.create({
+        url: 'https://chatgpt.com/',
+        focused: !!focus,
+        type: 'normal',
+        width: 1000,
+        height: 820
+      });
+      windowId = win.id;
+      tabsIn = (win.tabs || []).slice();
+      if (!tabsIn.length) {
+        try {
+          tabsIn = await chrome.tabs.query({ windowId });
+        } catch (e) {
+          tabsIn = [];
+        }
+      }
+      store.addLog('info', `已为批次「${batch.name}」打开独立窗口`);
+    }
+
+    const ids = tabsIn.filter((t) => !t.discarded).map((t) => t.id);
+
     for (let i = ids.length; i < want; i++) {
-      const t = await chrome.tabs.create({ windowId: runnerWindowId, url: 'https://chatgpt.com/', active: false });
+      const t = await chrome.tabs.create({ windowId, url: 'https://chatgpt.com/', active: false });
       ids.push(t.id);
     }
-    for (const id of ids) await harden(id);
-    store.addLog('info', `已创建并行执行窗口（${want} 个标签页）`);
-    return ids.slice(0, want);
+
+    const picked = ids.slice(0, want);
+    for (const id of picked) await harden(id);
+    return { ids: picked, windowId };
   }
 
   function resetWindow() {
@@ -122,5 +122,5 @@
     }
   }
 
-  root.CGR_TABS = { listTabs, usableTabs, ensureTabs, resetWindow, send, ping, ensureContentScript };
+  root.CGR_TABS = { listTabs, usableTabs, ensureBatchTabs, resetWindow, send, ping, ensureContentScript };
 })(typeof globalThis !== 'undefined' ? globalThis : self);

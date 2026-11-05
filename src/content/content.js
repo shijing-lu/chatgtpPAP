@@ -185,7 +185,7 @@
       }
 
       await send({ type: MSG.PROGRESS, leaseToken, phase: 'sent' });
-      send({ type: MSG.LOG, level: 'info', message: `#${item.index + 1} 已发送，等待出图…` });
+      send({ type: MSG.LOG, level: 'info', message: `#${item.index + 1} 已发送（${sent.method || 'auto'}），等待出图…` });
 
       const res = await watch.waitForOutcome(before, cfg, isAborted);
       await report(leaseToken, res.status, {
@@ -282,7 +282,7 @@
     return '';
   }
 
-  async function fetchAndUpload(index, src) {
+  async function fetchAndUpload(index, src, batchId) {
     try {
       let dataUrl = '';
       let mime = 'image/png';
@@ -304,6 +304,7 @@
         await send({
           type: MSG.DL_CHUNK,
           index,
+          batchId,
           seq: i,
           total,
           data: b64.slice(i * CHUNK, (i + 1) * CHUNK)
@@ -312,6 +313,7 @@
       await send({
         type: MSG.DL_COMMIT,
         index,
+        batchId,
         mime,
         ext: CGR.extFromUrl('', mime)
       });
@@ -341,7 +343,7 @@
         sendResponse({ ok: true });
         return false;
       case 'FETCH_IMAGE':
-        fetchAndUpload(msg.index, msg.src);
+        fetchAndUpload(msg.index, msg.src, msg.batchId);
         sendResponse({ ok: true });
         return false;
       case MSG.SELFCHECK:

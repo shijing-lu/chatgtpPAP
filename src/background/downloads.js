@@ -11,18 +11,15 @@
 
   function buildPath(item, ext) {
     const cfg = store.getCfg();
-    const batch = store.getBatch();
-    const folder = CGR.normalizeFolder(cfg.folder);
-    const batchName = String(cfg.batchName || batch.name || '').trim();
-    const sub = batchName ? CGR.normalizeFolder(batchName, '') : '';
+    const batch = store.getBatch(item.batchId);
+    const dir = store.resolveFolder(batch);
     const slug = CGR.slug(item.prompt, 40);
-    const name = CGR.renderName(cfg.template, {
+    const name = CGR.renderName(cfg.template || '{index:03}_{slug}', {
       index: item.index + 1,
       slug,
       ext,
-      batch: batchName || 'batch'
+      batch: (batch && batch.name) || 'batch'
     });
-    const dir = sub ? `${folder}/${sub}` : folder;
     return `${dir}/${name}.${ext}`;
   }
 
@@ -55,10 +52,10 @@
       return item;
     }
 
-    dlIndex.set(dlId, item.index);
-    await chrome.storage.local.set({ [`dl:${dlId}`]: { index: item.index } });
+    dlIndex.set(dlId, { index: item.index, batchId: item.batchId });
+    await chrome.storage.local.set({ [`dl:${dlId}`]: { index: item.index, batchId: item.batchId } });
     item.download.id = dlId;
-    await store.putItem(item);
+    await store.putItem(item.batchId, item);
     return item;
   }
 
@@ -84,14 +81,14 @@
     if (dlId == null) {
       item.status = CGR.STATUS.NEEDS_REVIEW;
       item.error = { code: 'DOWNLOAD_FAILED', message: '图片已生成但下载失败' };
-      await store.putItem(item);
+      await store.putItem(item.batchId, item);
       return item;
     }
 
-    dlIndex.set(dlId, item.index);
-    await chrome.storage.local.set({ [`dl:${dlId}`]: { index: item.index } });
+    dlIndex.set(dlId, { index: item.index, batchId: item.batchId });
+    await chrome.storage.local.set({ [`dl:${dlId}`]: { index: item.index, batchId: item.batchId } });
     item.download.id = dlId;
-    await store.putItem(item);
+    await store.putItem(item.batchId, item);
     return item;
   }
 
@@ -99,28 +96,33 @@
   async function requestFallback(item, reason) {
     const tabId = item.tabId || (item.lease && item.lease.tabId);
     item.download = Object.assign({}, item.download, { tier: 'B', state: 'fetching' });
-    await store.putItem(item);
+    await store.putItem(item.batchId, item);
     store.addLog('warn', `#${item.index + 1} 转用页面内取流（${reason}）`);
     if (!tabId) {
       item.status = CGR.STATUS.NEEDS_REVIEW;
       item.error = { code: 'NO_TAB_FOR_FALLBACK', message: '图片已生成但无法找到取流标签页' };
-      await store.putItem(item);
+      await store.putItem(item.batchId, item);
       return;
     }
     try {
-      await chrome.tabs.sendMessage(tabId, { type: 'FETCH_IMAGE', index: item.index, src: item.image && item.image.src });
+      await chrome.tabs.sendMessage(tabId, { type: 'FETCH_IMAGE', index: item.index, batchId: item.batchId, src: item.image && item.image.src });
     } catch (e) {
       item.status = CGR.STATUS.NEEDS_REVIEW;
       item.error = { code: 'FALLBACK_UNREACHABLE', message: '取流标签页已失联，图片未保存' };
-      await store.putItem(item);
+      await store.putItem(item.batchId, item);
     }
   }
 
-  function pushChunk(index, seq, total, data) {
-    let buf = chunkBuf.get(index);
+  function chunkKey(bid, index) {
+    return `${bid}:${index}`;
+  }
+
+  function pushChunk(bid, index, seq, total, data) {
+    const key = chunkKey(bid, index);
+    let buf = chunkBuf.get(key);
     if (!buf || buf.total !== total) {
       buf = { parts: new Array(total).fill(''), total, received: 0 };
-      chunkBuf.set(index, buf);
+      chunkBuf.set(key, buf);
     }
     if (buf.parts[seq] == null || buf.parts[seq] === '') {
       buf.parts[seq] = data;
@@ -129,14 +131,15 @@
     return buf;
   }
 
-  async function commitChunks(index, mime, ext) {
-    const buf = chunkBuf.get(index);
-    chunkBuf.delete(index);
+  async function commitChunks(bid, index, mime, ext) {
+    const key = chunkKey(bid, index);
+    const buf = chunkBuf.get(key);
+    chunkBuf.delete(key);
     if (!buf) return null;
     const b64 = buf.parts.join('');
     const type = mime || 'image/png';
     const dataUrl = `data:${type};base64,${b64}`;
-    const item = store.getItem(index);
+    const item = store.getItem(bid, index);
     if (!item) return null;
     item.image = Object.assign({}, item.image, { kind: 'data', src: '' });
     return startDataDownload(item, dataUrl, ext || CGR.extFromUrl('', type));
@@ -149,14 +152,18 @@
 
     const id = delta.id;
     // storage 里的映射是权威的（删除条目后会重排索引），内存表只做兜底
-    let index = null;
     const rec = await chrome.storage.local.get(`dl:${id}`);
     const val = rec[`dl:${id}`];
-    if (val && val.index != null) index = val.index;
-    if (index == null && dlIndex.has(id)) index = dlIndex.get(id);
-    if (index == null) return;
+    let index = val && val.index != null ? val.index : null;
+    let bid = val && val.batchId ? val.batchId : null;
+    if (index == null && dlIndex.has(id)) {
+      const mem = dlIndex.get(id);
+      index = mem.index;
+      bid = mem.batchId;
+    }
+    if (index == null || !bid) return;
 
-    const item = store.getItem(index);
+    const item = store.getItem(bid, index);
     if (!item) return;
 
     await chrome.storage.local.remove(`dl:${id}`);
@@ -167,9 +174,12 @@
       item.download = Object.assign({}, item.download, { state: 'complete' });
       item.error = null;
       item.ts = Object.assign({}, item.ts, { doneAt: Date.now() });
-      await store.putItem(item);
-      const rt = store.getRuntime();
-      await store.setRuntime({ stats: Object.assign({}, rt.stats, { done: (rt.stats.done || 0) + 1 }) });
+      await store.putItem(bid, item);
+      const b = store.getBatch(bid);
+      if (b) {
+        b.stats = Object.assign({}, b.stats, { done: ((b.stats && b.stats.done) || 0) + 1 });
+        await store.putBatch(b);
+      }
       store.addLog('info', `#${index + 1} 已保存：${item.filename}`);
     } else {
       const err = (delta.error && delta.error.current) || 'INTERRUPTED';
@@ -180,9 +190,12 @@
         item.status = CGR.STATUS.NEEDS_REVIEW;
         item.download = Object.assign({}, item.download, { state: 'interrupted' });
         item.error = { code: 'DOWNLOAD_INTERRUPTED', message: `下载失败：${err}` };
-        await store.putItem(item);
-        const rt = store.getRuntime();
-        await store.setRuntime({ stats: Object.assign({}, rt.stats, { needsReview: (rt.stats.needsReview || 0) + 1 }) });
+        await store.putItem(bid, item);
+        const b = store.getBatch(bid);
+        if (b) {
+          b.stats = Object.assign({}, b.stats, { needsReview: ((b.stats && b.stats.needsReview) || 0) + 1 });
+          await store.putBatch(b);
+        }
         store.addLog('error', `#${index + 1} 下载中断：${err}`);
       }
     }
