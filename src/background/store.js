@@ -370,6 +370,8 @@
         lastError: b.lastError || null,
         premiseCount: (b.premises || []).length,
         premiseEnabled: b.premiseEnabled !== false,
+        // 前提内容随视图一起下发，侧边栏「前提」页可直接按批次名称编辑任意批次
+        premises: (b.premises || []).slice(),
         counts: c,
         active: b.id === selId
       };

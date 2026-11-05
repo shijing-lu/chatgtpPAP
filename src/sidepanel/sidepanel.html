@@ -126,16 +126,23 @@
           <div class="pane-head">
             <div>
               <div class="lbl">前提设定（只建立上下文，不生成图片）</div>
-              <div class="hint" id="premiseScope">当前批次：—</div>
+              <div class="hint" id="premiseScope">正在给「—」配置前提</div>
             </div>
             <label class="chk"><input type="checkbox" id="premiseEnabled" /><span>启用</span></label>
           </div>
+
+          <div class="premise-bind">
+            <label class="lbl" for="premiseBatchSelect">绑定到哪个批次</label>
+            <select id="premiseBatchSelect" class="input" title="选择要配置前提的批次"></select>
+            <div class="hint" id="premiseBindHint">每个批次有自己独立的一套前提</div>
+          </div>
+
           <div class="composer-row">
             <textarea id="premiseInput" rows="2" placeholder="例如：你是一位专业的产品摄影师，接下来所有图片都遵循这个风格：柔和侧光、浅景深。"></textarea>
             <button id="btnAddPremise" class="add-btn" title="添加前提">＋</button>
           </div>
           <div class="hint" id="premiseHint">当前 0 条</div>
-          <div class="hint">每个批次的前提互不影响；切换批次后这里编辑的就是那个批次的前提。</div>
+          <div class="hint">每条新对话开始时逐条发送，发完就走，不等回复、不生图、不下载；各批次互不影响。</div>
         </div>
         <div class="list" id="premiseList"></div>
         <div class="empty" id="premiseEmpty">这个批次还没有前提设定。</div>

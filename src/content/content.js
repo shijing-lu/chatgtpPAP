@@ -82,7 +82,7 @@
 
   /* ---------------- 前提设定 ---------------- */
 
-  /** 逐条发送前提，等模型答完再发下一条。不取图、不计入队列。 */
+  /** 逐条发送前提，发出去就算完成：不等回复、不取图、不计入队列。 */
   async function applyPremises(list, cfg, leaseToken, isAborted) {
     for (let i = 0; i < list.length; i++) {
       if (isAborted()) return { ok: false, reason: 'aborted' };

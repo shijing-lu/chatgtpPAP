@@ -732,15 +732,66 @@
       : '可点选、拖拽，或直接 Ctrl+V 粘贴截图';
   }
 
-  /* ---------------- 前提（按批次） ---------------- */
+  /* ---------------- 前提（按批次名称绑定） ---------------- */
+
+  /* '' = 跟随当前选中批次；否则是用户在「前提」页手动锁定的批次 id */
+  let premiseTargetId = '';
+  let premiseBindSig = '';
+
+  function premiseTarget(v) {
+    const list = (v && v.batches) || [];
+    const id = premiseTargetId || (v && v.selectedId) || '';
+    return list.find((b) => b.id === id) || null;
+  }
+
+  function premiseList() {
+    const t = premiseTarget(view);
+    return ((t && t.premises) || []).slice();
+  }
+
+  /* 下拉里按批次名称列出所有批次，选谁就给谁配前提，不必先切队列页 */
+  function renderPremiseBinder(v) {
+    const sel = $('premiseBatchSelect');
+    const list = (v && v.batches) || [];
+    if (premiseTargetId && !list.some((b) => b.id === premiseTargetId)) premiseTargetId = '';
+
+    const curName = (v && v.current && v.current.name) || '';
+    const sig = `${(v && v.selectedId) || ''}|${curName}|` +
+      list.map((b) => `${b.id}:${b.name}:${b.premiseCount || 0}:${b.premiseEnabled === false ? 0 : 1}`).join('|');
+    if (sig !== premiseBindSig) {
+      premiseBindSig = sig;
+      sel.textContent = '';
+
+      const follow = document.createElement('option');
+      follow.value = '';
+      follow.textContent = curName ? `跟随当前批次：${curName}` : '跟随当前批次';
+      sel.append(follow);
+
+      for (const b of list) {
+        const o = document.createElement('option');
+        o.value = b.id;
+        o.textContent = `${b.name}（${b.premiseCount || 0} 条前提${b.premiseEnabled === false ? ' · 已停用' : ''}）`;
+        sel.append(o);
+      }
+    }
+    sel.value = premiseTargetId;
+    sel.disabled = !list.length;
+
+    $('premiseBindHint').textContent = list.length
+      ? `共 ${list.length} 个批次，各自独立：${list.map((b) => `${b.name} ${b.premiseCount || 0} 条`).join('、')}`
+      : '还没有批次，先回「队列」页新建一个';
+  }
 
   function renderPremise(v) {
-    const c = v.current;
-    const list = (c && c.premises) || [];
+    renderPremiseBinder(v);
+    const t = premiseTarget(v);
+    const list = (t && t.premises) || [];
     const box = $('premiseList');
     box.textContent = '';
+
     $('premiseEmpty').style.display = list.length ? 'none' : 'block';
-    $('premiseScope').textContent = c ? `当前批次：${c.name}` : '当前批次：—';
+    $('premiseEmpty').textContent = t ? `「${t.name}」还没有前提设定。` : '还没有批次，先新建一个。';
+    $('premiseScope').textContent = t ? `正在给「${t.name}」配置前提` : '还没有批次';
 
     list.forEach((text, i) => {
       const row = document.createElement('div');
@@ -750,63 +801,71 @@
       idx.className = 'idx';
       idx.textContent = '#P' + (i + 1);
 
-      const t = document.createElement('div');
-      t.className = 'txt';
-      t.textContent = text;
+      const txtEl = document.createElement('div');
+      txtEl.className = 'txt';
+      txtEl.textContent = text;
 
       const del = document.createElement('button');
       del.className = 'mini muted';
       del.textContent = '删除';
       del.addEventListener('click', () => removePremise(i));
 
-      row.append(idx, t, del);
+      row.append(idx, txtEl, del);
       box.append(row);
     });
 
-    $('premiseEnabled').checked = c ? c.premiseEnabled !== false : true;
-    $('premiseEnabled').disabled = !c;
-    $('premiseHint').textContent = `当前 ${list.length} 条`;
+    $('premiseEnabled').checked = t ? t.premiseEnabled !== false : true;
+    $('premiseEnabled').disabled = !t;
+    $('btnAddPremise').disabled = !t;
+    $('premiseInput').disabled = !t;
+    $('premiseHint').textContent = t ? `「${t.name}」当前 ${list.length} 条` : '当前 0 条';
 
+    /* 队列页这行提示说的是「正在运行的那个批次」，与前提页的编辑目标无关 */
+    const c = v.current;
     const note = $('premiseNote');
-    if (c && c.premiseEnabled !== false && list.length) {
+    if (c && c.premiseEnabled !== false && (c.premises || []).length) {
       note.style.display = 'block';
-      note.textContent = `本批次已启用 ${list.length} 条前提：每条新对话会先发送并等模型回复，再开始生图`;
+      note.textContent = `「${c.name}」已启用 ${c.premises.length} 条前提：每条新对话先发完就走（不等回复），再开始生图`;
     } else {
       note.style.display = 'none';
     }
   }
 
   async function savePremises(list, silent) {
-    const bid = curId();
-    if (!bid) return false;
+    const t = premiseTarget(view);
+    if (!t) return false;
     const res = await send(CGR.CMD.BATCH_UPDATE, {
-      id: bid,
+      id: t.id,
       patch: { premises: list, premiseEnabled: $('premiseEnabled').checked }
     });
     if (!res.ok) {
       toast(res.error || '保存失败');
       return false;
     }
-    if (!silent) toast(list.length ? `已保存 ${list.length} 条前提` : '前提已清空');
+    if (!silent) toast(list.length ? `已保存「${t.name}」的 ${list.length} 条前提` : `「${t.name}」的前提已清空`);
     return true;
   }
 
   async function addPremise() {
+    const t = premiseTarget(view);
+    if (!t) return toast('先新建一个批次');
     const text = ($('premiseInput').value || '').trim();
     if (!text) return toast('先输入前提内容');
-    const list = ((cur() && cur().premises) || []).slice();
+    const list = premiseList();
     list.push(text);
     if (await savePremises(list, true)) {
       $('premiseInput').value = '';
-      toast(`已添加第 ${list.length} 条前提`);
+      toast(`已给「${t.name}」添加第 ${list.length} 条前提`);
     }
   }
 
   async function removePremise(i) {
-    const list = ((cur() && cur().premises) || []).slice();
+    const t = premiseTarget(view);
+    const list = premiseList();
+    if (i < 0 || i >= list.length) return;
     list.splice(i, 1);
     await savePremises(list, true);
-    toast('已删除一条前提');
+    toast(t ? `已删除「${t.name}」的一条前提` : '已删除一条前提');
   }
 
   /* ---------------- 批次 ---------------- */
@@ -1026,10 +1085,17 @@
         addPremise();
       }
     });
+    $('premiseBatchSelect').addEventListener('change', (e) => {
+      premiseTargetId = e.target.value || '';
+      renderPremise(view || EMPTY_VIEW);
+      const t = premiseTarget(view);
+      if (t) toast(`现在配置的是「${t.name}」的前提`);
+    });
     $('premiseEnabled').addEventListener('change', async () => {
-      const list = ((cur() && cur().premises) || []).slice();
-      await savePremises(list, true);
-      toast($('premiseEnabled').checked ? '本批次前提已启用' : '本批次前提已停用');
+      const t = premiseTarget(view);
+      if (!t) return toast('先新建一个批次');
+      await savePremises(premiseList(), true);
+      toast($('premiseEnabled').checked ? `「${t.name}」的前提已启用` : `「${t.name}」的前提已停用`);
     });
     $('premiseNote').addEventListener('click', () => {
       const tab = document.querySelector('.tab[data-tab="premise"]');

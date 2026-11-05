@@ -118,10 +118,10 @@
     autoStartNextTabDelayMs: 2000,
 
 
-    // 前提设定：不产生图片，每条新对话开始前先逐条发送并等待模型回复
+    // 前提设定：按批次独立保存；每条新对话开始前逐条发送，发完即走，不等回复、不生图
     premises: [],
     premiseEnabled: true,
-    premiseTimeoutMs: 60000
+    premiseTimeoutMs: 60000 // 已废弃：保留仅为兼容旧配置，前提阶段不再等待回复
   };
 
   CGR.LIMITS = {

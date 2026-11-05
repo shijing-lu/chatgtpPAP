@@ -151,8 +151,8 @@
   }
 
   /**
-   * 等待「前提设定」的回复。只关心模型有没有答完，不关心内容，也完全不看图片。
-   * 同样以 MutationObserver 为主驱动，避免后台标签页定时器被节流。
+   * 等待正式生图任务的出图结果（前提阶段不调用它）。
+   * 以 MutationObserver 为主驱动，避免后台标签页定时器被节流。
    * @returns {Promise<'ok'|'timeout'|'limit'|'aborted'>}
    */
   root.CGR_WATCH = { waitForOutcome, setEvaluateHook, triggerEvaluate };
