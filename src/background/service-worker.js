@@ -148,6 +148,8 @@ async function handleContent(msg, sender) {
 async function handleCommand(msg) {
   const p = msg.payload || {};
   switch (msg.cmd) {
+    case CGR.CMD.ADD_ITEM:
+      return orch.addItem(p.prompt, p.refImages, p.batchName);
     case CGR.CMD.ENQUEUE:
       return orch.enqueue(p.prompts, { batchName: p.batchName });
     case CGR.CMD.START:
@@ -182,6 +184,7 @@ async function handleCommand(msg) {
         await store.clearBatchStorage();
         await store.setRuntime({ status: G.IDLE, activeTabs: {}, limitUntil: 0, stats: { done: 0, failed: 0, needsReview: 0, skipped: 0 } });
         await store.publishView();
+        await orch.gcImages();
       });
       return { ok: true };
     }

@@ -163,5 +163,88 @@
     return false;
   }
 
-  root.CGR_COMPOSER = { sendPrompt, newChat, getComposer, readText, insertText, clearComposer };
+  /* ---------------- 参考图附加 ---------------- */
+
+  function findFileInput() {
+    const el = getComposer();
+    const scope = (el && el.closest('form')) || document;
+    const inputs = Array.from(scope.querySelectorAll('input[type="file"]'));
+    if (!inputs.length) return null;
+    return inputs.find((i) => i.multiple) || inputs[0];
+  }
+
+  /** 输入区里已经挂上的附件数量（缩略图 / 文件条）。缩略图可能是 blob: 也可能是签名地址，所以按尺寸过滤图标 */
+  function countAttachments() {
+    const el = getComposer();
+    const scope = (el && el.closest('form')) || document;
+    let n = 0;
+    for (const img of scope.querySelectorAll('img')) {
+      const w = img.naturalWidth || img.getBoundingClientRect().width || 0;
+      if (w >= 32) n += 1;
+    }
+    n += scope.querySelectorAll('[data-testid*="attachment"], [data-testid*="file"]').length;
+    return n;
+  }
+
+  /**
+   * 把参考图塞进 ChatGPT 的隐藏 file input，再等缩略图出现。
+   * 图片数据存在 chrome.storage 的 img:<id> 里（内容脚本可直接读）。
+   */
+  async function attachImages(refs) {
+    if (!refs || !refs.length) return { ok: true, count: 0 };
+
+    const input = findFileInput();
+    if (!input) return { ok: false, reason: 'no-file-input' };
+
+    const files = [];
+    for (const ref of refs) {
+      try {
+        const key = 'img:' + ref.id;
+        const rec = await chrome.storage.local.get(key);
+        const data = rec[key];
+        if (!data || !data.dataUrl) continue;
+        const blob = await (await fetch(data.dataUrl)).blob();
+        const name = data.name || `ref-${files.length + 1}.png`;
+        files.push(new File([blob], name, { type: blob.type || data.type || 'image/png' }));
+      } catch (e) {
+        /* 单张失败不影响其他 */
+      }
+    }
+    if (!files.length) return { ok: false, reason: 'image-data-missing' };
+
+    const before = countAttachments();
+    const dt = new DataTransfer();
+    for (const f of files) dt.items.add(f);
+    try {
+      input.files = dt.files;
+    } catch (e) {
+      return { ok: false, reason: 'assign-failed' };
+    }
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+
+    const ok = await CGR.pollUntil(() => countAttachments() > before, 30000, 400);
+    return ok ? { ok: true, count: files.length } : { ok: false, reason: 'upload-timeout' };
+  }
+
+  /** 当前输入框里已挂上的附件缩略图地址 */
+  function attachmentSrcs() {
+    const el = getComposer();
+    const scope = (el && el.closest('form')) || document;
+    return Array.from(scope.querySelectorAll('img'))
+      .filter((i) => (i.naturalWidth || i.getBoundingClientRect().width || 0) >= 32)
+      .map((i) => i.currentSrc || i.src)
+      .filter(Boolean);
+  }
+
+  root.CGR_COMPOSER = {
+    sendPrompt,
+    newChat,
+    getComposer,
+    readText,
+    insertText,
+    clearComposer,
+    attachImages,
+    countAttachments,
+    attachmentSrcs
+  };
 })(typeof globalThis !== 'undefined' ? globalThis : self);

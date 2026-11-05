@@ -103,6 +103,82 @@
     });
   }
 
+  /* ---------------- 单条追加（输入框 + ＋） ---------------- */
+
+  async function addItem(prompt, refImages, batchName) {
+    return store.withLock(async () => {
+      await store.ensureLoaded();
+      const text = String(prompt || '').trim();
+      if (!text) return { ok: false, error: '提示词不能为空' };
+
+      const items = store.allItems();
+      if (items.length >= CGR.LIMITS.maxPromptsPerBatch) {
+        return { ok: false, error: `队列最多 ${CGR.LIMITS.maxPromptsPerBatch} 条` };
+      }
+
+      let batch = store.getBatch();
+      if (!batch.count) {
+        const cfg0 = store.getCfg();
+        batch = {
+          id: CGR.uuid(),
+          name: String(batchName || cfg0.batchName || '').trim() || stampName(),
+          createdAt: Date.now(),
+          count: 0
+        };
+        await store.setBatch(batch);
+      }
+
+      const cfg = store.getCfg();
+      const refs = (Array.isArray(refImages) ? refImages : [])
+        .filter((r) => r && r.id)
+        .map((r) => ({ id: r.id, name: r.name || '', type: r.type || '' }));
+
+      const item = {
+        index: items.length,
+        prompt: text,
+        refImages: refs,
+        status: CGR.STATUS.PENDING,
+        attempt: 0,
+        maxAttempts: cfg.maxAttempts || 2,
+        rev: 0,
+        lease: null,
+        tabId: null,
+        image: null,
+        download: null,
+        error: null,
+        filename: '',
+        chatPrepared: false,
+        ts: { queuedAt: Date.now() }
+      };
+      await store.putItem(item);
+      await store.setBatch(Object.assign({}, batch, { count: items.length + 1 }));
+      await store.publishView();
+      return { ok: true, index: item.index, count: items.length + 1, refCount: refs.length, batchName: batch.name };
+    });
+  }
+
+  /** 回收没有被任何队列项引用的参考图（10 分钟内新写入的先留着，避免误删刚选好的） */
+  async function gcImages() {
+    try {
+      const all = await chrome.storage.local.get(null);
+      const used = new Set();
+      for (const it of store.allItems()) {
+        for (const r of it.refImages || []) used.add(r.id);
+      }
+      const now = Date.now();
+      const removes = Object.keys(all).filter((k) => {
+        if (!k.startsWith('img:')) return false;
+        if (used.has(k.slice(4))) return false;
+        const rec = all[k];
+        return !(rec && rec.createdAt && now - rec.createdAt < 10 * 60 * 1000);
+      });
+      if (removes.length) await chrome.storage.local.remove(removes);
+      return removes.length;
+    } catch (e) {
+      return 0;
+    }
+  }
+
   /* ---------------- 全局控制 ---------------- */
 
   async function start() {
@@ -241,6 +317,7 @@
           prompt: item.prompt,
           attempt: item.attempt,
           chatPrepared: item.chatPrepared,
+          refImages: item.refImages || [],
           needFreshChat: needsFreshChat(item, cfg)
         }
       };
@@ -328,6 +405,11 @@
           await handleRetryable(item, 'TIMEOUT', cfg);
         }
         return { ok: true };
+      }
+
+      if (status === 'ATTACH_FAILED') {
+        store.addLog('warn', `#${item.index + 1} 参考图附加失败：${data.reason || '未知原因'}，本条将重试`);
+        return handleRetryable(item, 'ATTACH_FAILED', cfg);
       }
 
       if (status === 'PREMISE_FAILED') {
@@ -529,6 +611,7 @@
     await store.setBatch(Object.assign({}, batch, { count: kept.length }));
     await remapDownloadIndexes(remap);
     if (dl && dl.clearCache) dl.clearCache();
+    await gcImages();
 
     const stats = { done: 0, failed: 0, needsReview: 0, skipped: 0 };
     for (const it of kept) {
@@ -600,6 +683,8 @@
 
   root.CGR_ORCH = {
     enqueue,
+    addItem,
+    gcImages,
     start,
     pause,
     resume,

@@ -98,7 +98,15 @@
           return finish({ status: 'TIMEOUT', phase: 'no-first-byte' });
         }
 
-        const fresh = probe.freshImages(before);
+        // 带参考图的任务：只认「最后一条 assistant 消息之后」出现的图，
+        // 否则用户上传的参考图会被当成生成结果
+        let anchor = null;
+        if (before.hasRefs) {
+          const list = CGR.pickAll(CGR.SEL.assistantMsg);
+          anchor = list.length ? list[list.length - 1] : null;
+        }
+
+        const fresh = probe.freshImages(before, anchor);
         if (fresh.length) {
           const key = fresh
             .map((f) => f.src)

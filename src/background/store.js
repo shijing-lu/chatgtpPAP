@@ -196,6 +196,7 @@
         f: it.filename || '',
         e: it.error ? String(it.error.code || it.error.message || '').slice(0, 40) : '',
         p: String(it.prompt || '').slice(0, 240),
+        r: (it.refImages || []).length,
         d: it.download && it.download.state ? it.download.state : ''
       };
     });

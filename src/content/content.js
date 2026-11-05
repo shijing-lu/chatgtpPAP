@@ -157,8 +157,25 @@
         send({ type: MSG.LOG, level: 'info', message: `前提已就绪（${premises.length} 条）` });
       }
 
+      // 参考图：必须在发送前挂到输入框，且要等缩略图出现（上传完成）
+      const refs = Array.isArray(item.refImages) ? item.refImages : [];
+      if (refs.length) {
+        send({ type: MSG.LOG, level: 'info', message: `#${item.index + 1} 附加 ${refs.length} 张参考图…` });
+        const attached = await composer.attachImages(refs);
+        if (!attached.ok) {
+          await report(leaseToken, 'ATTACH_FAILED', { reason: attached.reason });
+          return;
+        }
+        await CGR.sleep(600);
+      }
+
       // 发送前快照
       const before = probe.snapshot();
+      if (refs.length) {
+        before.hasRefs = true;
+        // 输入框里已挂的缩略图算作「既有图片」，不参与差集
+        for (const src of composer.attachmentSrcs()) before.imgs.add(src);
+      }
       await send({ type: MSG.PROGRESS, leaseToken, phase: 'sending' });
 
       const sent = await composer.sendPrompt(item.prompt, cfg);

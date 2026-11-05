@@ -77,6 +77,7 @@
 
   // side panel -> service worker 命令
   CGR.CMD = {
+    ADD_ITEM: 'ADD_ITEM',
     ENQUEUE: 'ENQUEUE',
     START: 'START',
     PAUSE: 'PAUSE',
@@ -112,9 +113,6 @@
     limitCooldownMin: 60,
     autoStartNextTabDelayMs: 2000,
 
-    // 提示词分隔方式：auto = 出现标识符就按标识符切，否则按行切
-    splitMode: 'auto', // auto | delimiter | line
-    splitDelimiter: '---',
 
     // 前提设定：不产生图片，每条新对话开始前先逐条发送并等待模型回复
     premises: [],

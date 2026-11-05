@@ -53,8 +53,11 @@
     return { imgs, msgCount: allMsgCount(), assistantCount: assistantCount(), convId: CGR.getConvId() };
   }
 
-  /** 与快照做差集，返回新出现的候选图 */
-  function freshImages(before) {
+  /**
+   * 与快照做差集，返回新出现的候选图。
+   * afterNode 非空时，只接受出现在该节点之后的图片 —— 用来排除「用户消息里的参考图」。
+   */
+  function freshImages(before, afterNode) {
     const rootEl = CGR.getMain();
     const out = [];
     for (const img of rootEl.querySelectorAll('img')) {
@@ -62,6 +65,10 @@
       if (!src) continue;
       if (before.imgs.has(src)) continue;
       if (!isLikelyGenerated(img)) continue;
+      if (afterNode && document.contains(afterNode)) {
+        const pos = afterNode.compareDocumentPosition(img);
+        if (!(pos & Node.DOCUMENT_POSITION_FOLLOWING)) continue;
+      }
       out.push({ src, w: img.naturalWidth || 0, h: img.naturalHeight || 0 });
     }
     return out;
