@@ -47,50 +47,61 @@
         .map(([k]) => Number(k));
       const alive = {};
       for (const id of ids) {
-        const res = await CGR.withTimeout(tabs.send(id, { type: CGR.MSG.PING }), 5000, null);
-        if (res && res.ok) {
-          alive[id] = rt.activeTabs[id];
-          misses.delete(id);
-          await lease.renewByTab(id);
-          await CGR.withTimeout(tabs.send(id, { type: CGR.MSG.EVALUATE }), 5000, null);
-        } else {
+        try {
+          const res = await CGR.withTimeout(tabs.send(id, { type: CGR.MSG.PING }), 5000, null);
+          if (res && res.ok) {
+            alive[id] = rt.activeTabs[id];
+            misses.delete(id);
+            await lease.renewByTab(id);
+            await CGR.withTimeout(tabs.send(id, { type: CGR.MSG.EVALUATE }), 5000, null);
+            continue;
+          }
+
           const n = (misses.get(id) || 0) + 1;
           misses.set(id, n);
-          if (n >= 2) {
-            misses.delete(id);
-            await lease.reclaimByTab(id, 'tab-dead');
-            // 保留归属关系（标记 stale），否则这个标签页就再也唤不回来了
-            alive[id] = Object.assign({}, rt.activeTabs[id], { stale: true });
-
-            let url = '';
-            try {
-              const t = await chrome.tabs.get(id);
-              url = t.url || '';
-            } catch (e) {
-              url = '';
-            }
-            if (!url) {
-              delete alive[id];
-              store.addLog('warn', `标签页 ${id} 已不存在，已从批次中移除`);
-            } else {
-              const how = await tabs.reviveTab(id);
-              if (how === 'reinjected' || how === 'reloaded') {
-                store.addLog('warn', `标签页 ${id} 连续无响应（${url.slice(0, 50)}）→ ${how === 'reinjected' ? '已重新注入脚本' : '已重载页面'}`);
-              } else {
-                // 彻底救不回来：换一个新的标签页顶替，别让整个批次停在这
-                const nid = await tabs.replaceTab(id);
-                if (nid) {
-                  delete alive[id];
-                  alive[nid] = Object.assign({}, info, { stale: false, at: Date.now() });
-                  store.addLog('warn', `标签页 ${id} 无法恢复，已换用新标签页 ${nid} 继续`);
-                } else {
-                  store.addLog('error', `标签页 ${id} 无法恢复且无法替换，请手动刷新该批次的窗口`);
-                }
-              }
-            }
-          } else {
+          if (n < 2) {
             alive[id] = rt.activeTabs[id];
+            continue;
           }
+
+          misses.delete(id);
+          await lease.reclaimByTab(id, 'tab-dead');
+          // 保留归属关系（标记 stale），否则这个标签页就再也唤不回来了
+          alive[id] = Object.assign({}, rt.activeTabs[id], { stale: true });
+
+          let url = '';
+          try {
+            const t = await chrome.tabs.get(id);
+            url = t.url || '';
+          } catch (e) {
+            url = '';
+          }
+          if (!url) {
+            delete alive[id];
+            store.addLog('warn', `标签页 ${id} 已不存在，已从批次中移除`);
+            continue;
+          }
+
+          const how = await tabs.reviveTab(id);
+          if (how === 'reinjected' || how === 'reloaded') {
+            store.addLog('warn', `标签页 ${id} 连续无响应（${url.slice(0, 50)}）→ ${how === 'reinjected' ? '已重新注入脚本' : '已重载页面'}`);
+          } else {
+            // 彻底救不回来：换一个新的标签页顶替，别让整个批次停在这
+            const nid = await tabs.replaceTab(id);
+            if (nid) {
+              delete alive[id];
+              // 继承旧标签页的批次归属。原来这里引用了未定义的 info，
+              // 一抛 ReferenceError 整轮扫描就中断，后面的自愈和视图刷新全都不执行。
+              alive[nid] = Object.assign({}, rt.activeTabs[id] || {}, { stale: false, at: Date.now() });
+              store.addLog('warn', `标签页 ${id} 无法恢复，已换用新标签页 ${nid} 继续`);
+            } else {
+              store.addLog('error', `标签页 ${id} 无法恢复且无法替换，请手动刷新该批次的窗口`);
+            }
+          }
+        } catch (e) {
+          // 单个标签页出问题不能拖垮整轮扫描（自愈、视图刷新还得继续跑）
+          alive[id] = rt.activeTabs[id];
+          store.addLog('warn', `扫描标签页 ${id} 出错：${String((e && e.message) || e)}`);
         }
       }
       if (ids.length) await store.setRuntime({ activeTabs: alive });
@@ -120,13 +131,13 @@
         const anyPending = items.some((it) => it.status === S.PENDING);
         const idleFor = Date.now() - (b.lastClaimAt || b.startedAt || Date.now());
         if (anyActive || !anyPending || idleFor < 20000) continue;
-        if (Date.now() - (healAt.get(b.id) || 0) < 45000) continue;
+        if (Date.now() - (healAt.get(b.id) || 0) < 25000) continue;
         healAt.set(b.id, Date.now());
 
         const cur = store.getRuntime();
+        const mine = Object.entries(cur.activeTabs || {}).filter(([, info]) => info && info.batchId === b.id);
         let injected = 0;
-        for (const [tid, info] of Object.entries(cur.activeTabs || {})) {
-          if (!info || info.batchId !== b.id) continue;
+        for (const [tid] of mine) {
           const id = Number(tid);
           if (await tabs.ping(id)) continue;
           const how = await tabs.reviveTab(id);
@@ -137,8 +148,16 @@
         }
         if (injected) {
           store.addLog('warn', `批次「${b.name}」页面连接已断开，已自动重建 ${injected} 个标签页`);
+          continue;
+        }
+
+        // 一个绑定标签页都没有，或脚本活着却始终不领任务：直接重新绑定并唤醒。
+        // 以前这里只写一条「请刷新窗口」的日志，批次就一直挂在「运行中」不动。
+        const r = await orch.rebindBatch(b.id);
+        if (r.ok) {
+          store.addLog('warn', `批次「${b.name}」没有页面在领任务，已重新接管 ${r.tabs} 个标签页并唤醒`);
         } else {
-          store.addLog('warn', `批次「${b.name}」已开始但页面没有领取任务，请刷新它的窗口后点「继续」`);
+          store.addLog('error', `批次「${b.name}」找不到可用的 ChatGPT 标签页，请打开/刷新 chatgpt.com 后点「立即修复」`);
         }
       }
 
@@ -149,7 +168,16 @@
   }
 
   function onAlarm(alarm) {
-    if (alarm.name === ALARM) scan().catch(() => {});
+    if (alarm.name !== ALARM) return;
+    scan().catch((e) => {
+      // 以前异常被静默吞掉，扫描一崩就再也看不到任何自愈日志
+      try {
+        store.addLog('error', `定时扫描异常：${String((e && e.message) || e)}（本轮自愈未完成，下轮会自动重试）`);
+        store.publishView().catch(() => {});
+      } catch (_) {
+        /* ignore */
+      }
+    });
   }
 
   root.CGR_SCHED = { ALARM, ensure, scan, onAlarm };

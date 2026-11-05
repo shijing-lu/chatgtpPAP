@@ -236,30 +236,44 @@ async function handleCommand(msg) {
     case CGR.CMD.FIX_TABS: {
       // 一键修复：重新接管指定批次（不指定则接管所有 ChatGPT 标签页）
       const list = await tabs.usableTabs();
-      if (!list.length) return { ok: false, error: '没有打开的 ChatGPT 标签页' };
+      if (!list.length) return { ok: false, error: '没有打开的 ChatGPT 标签页，请先打开 chatgpt.com' };
 
       const rt = store.getRuntime();
       const targetBatch = p.batchId;
+      let candidates = list.filter((t) => {
+        const info = (rt.activeTabs || {})[t.id];
+        return !targetBatch || (info && info.batchId === targetBatch);
+      });
+
+      // 该批次一个登记过的标签页都没有（扩展重载后很常见）：直接复用当前这个标签页，
+      // 并重新绑定归属。否则「立即修复」会报「接管失败」，批次还是卡在运行中。
+      const rebind = !candidates.length && !!targetBatch;
+      if (rebind) {
+        candidates = list.slice().sort((a, b) => (b.active ? 1 : 0) - (a.active ? 1 : 0)).slice(0, 1);
+      }
+
       const fixed = [];
-      for (const t of list) {
-        if (targetBatch) {
-          const info = (rt.activeTabs || {})[t.id];
-          if (!info || info.batchId !== targetBatch) continue;
-        }
+      for (const t of candidates) {
         if (await tabs.ensureContentScript(t.id)) fixed.push(t.id);
       }
-      if (!fixed.length) return { ok: false, error: '接管失败，请手动刷新该批次的窗口后重试' };
+      if (!fixed.length) return { ok: false, error: '接管失败，请手动刷新 chatgpt.com 后重试' };
 
       await store.withLock(async () => {
         const cur = store.getRuntime();
         const activeTabs = Object.assign({}, cur.activeTabs);
         for (const id of fixed) {
-          activeTabs[id] = Object.assign({}, activeTabs[id], { state: 'idle', at: Date.now() });
+          activeTabs[id] = Object.assign({}, activeTabs[id], {
+            batchId: targetBatch || (activeTabs[id] && activeTabs[id].batchId) || '',
+            state: 'idle',
+            stale: false,
+            at: Date.now()
+          });
         }
         const b = targetBatch ? store.getBatch(targetBatch) : null;
         if (b) {
           b.status = G.RUNNING;
-          b.startedAt = b.startedAt || Date.now();
+          b.startedAt = Date.now();
+          b.lastClaimAt = 0;
           b.limitUntil = 0;
           b.lastError = null;
           await store.putBatch(b);
@@ -268,8 +282,9 @@ async function handleCommand(msg) {
       });
 
       for (const id of fixed) await tabs.send(id, { type: CGR.MSG.WAKE });
-      store.addLog('info', `已重新接管标签页：${fixed.join(', ')}`);
-      return { ok: true, fixed };
+      store.addLog('info', `已重新接管标签页：${fixed.join(', ')}${rebind ? '（并重新绑定到该批次）' : ''}`);
+      await store.publishView();
+      return { ok: true, fixed, rebound: rebind };
     }
     case CGR.CMD.EXPORT_LOGS: {
       const b = store.getBatch(p.batchId);

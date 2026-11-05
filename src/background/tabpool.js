@@ -110,7 +110,12 @@
       store.addLog('error', `无法向标签页 ${tabId} 注入脚本：${(e && e.message) || e}`);
       return false;
     }
-    return await ping(tabId);
+    // 刚注入时 onMessage 可能还没注册，给几次短重试，别把「正在就绪」误判成「接管失败」
+    for (let i = 0; i < 4; i++) {
+      if (await ping(tabId)) return true;
+      await CGR.sleep(300);
+    }
+    return false;
   }
 
   /**
@@ -152,11 +157,17 @@
 
     // ② 复用用户已经打开、且没被别的批次占用的 ChatGPT 标签页（优先当前活动的那个）
     const all = await chrome.tabs.query({ url: MATCH });
-    // 注意：只排除「确实属于其它批次」的标签页。
-    // 没有 batchId 的条目是历史遗留的僵尸记录，不能因为它占着位置就去开新标签页。
+    // 只有「其它批次此刻仍在运行」才算真的占用这个标签页。
+    // 旧批次已经停止/完成/空闲时，它的历史归属不该挡路，否则换一个批次点「开始」
+    // 就会误判成没有可用标签页，转头新建一个 —— 用户看到的「又开新标签页」多半来自这里。
+    // 没有 batchId 的条目是历史僵尸记录，同样不能占位置。
     const used = new Set(
       Object.entries(rt.activeTabs || {})
-        .filter(([, v]) => v && v.batchId)
+        .filter(([, v]) => {
+          if (!v || !v.batchId) return false;
+          const other = store.getBatch(v.batchId);
+          return !!other && other.status === CGR.GLOBAL.RUNNING;
+        })
         .map(([k]) => Number(k))
     );
     const free = all

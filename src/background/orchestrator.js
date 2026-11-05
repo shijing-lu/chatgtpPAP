@@ -262,6 +262,48 @@
 
   /* ---------------- 运行控制 ---------------- */
 
+  /**
+   * 给批次绑定执行标签页并接管页面（优先复用当前 ChatGPT 标签页）。
+   * 不加锁：调用方必须已经持有 store.withLock，否则与 scan/claim 会互相踩。
+   */
+  async function bindTabs(b, desired, focus, switchSelection) {
+    const secured = await tabs.ensureBatchTabs(b, desired, focus);
+
+    const rt = store.getRuntime();
+    const activeTabs = Object.assign({}, rt.activeTabs);
+    for (const id of secured.ids) {
+      activeTabs[id] = Object.assign({}, activeTabs[id], {
+        batchId: b.id, state: 'idle', stale: false, at: Date.now()
+      });
+    }
+    const patch = { activeTabs };
+    if (switchSelection) patch.selectedBatchId = b.id;
+    await store.setRuntime(patch);
+
+    const ready = [];
+    const dead = [];
+    for (const id of secured.ids) {
+      const ok = await tabs.ensureContentScript(id);
+      (ok ? ready : dead).push(id);
+    }
+
+    // 刚打开的页面 content script 可能还没挂上，隔一会儿再确认一次，
+    // 别把「页面还在加载」误判成「这个标签页废了」。
+    if (dead.length) {
+      await CGR.sleep(1200);
+      for (let i = dead.length - 1; i >= 0; i--) {
+        const id = dead[i];
+        if (await tabs.ensureContentScript(id)) {
+          dead.splice(i, 1);
+          ready.push(id);
+        }
+      }
+    }
+
+    b.windowId = secured.windowId;
+    return { ready, dead };
+  }
+
   async function start(bid) {
     return store.withLock(async () => {
       await store.ensureLoaded();
@@ -274,40 +316,50 @@
 
       const n = effectiveConcurrency();
       const othersRunning = store.listBatches().some((x) => x.id !== bid && x.status === G.RUNNING);
+      const bound = await bindTabs(b, n, !othersRunning, true);
 
-      const secured = await tabs.ensureBatchTabs(b, n, !othersRunning);
-
-      const rt = store.getRuntime();
-      const activeTabs = Object.assign({}, rt.activeTabs);
-      for (const id of secured.ids) {
-        activeTabs[id] = Object.assign({}, activeTabs[id], { batchId: bid, state: 'idle', at: Date.now() });
+      // 一个标签页都接管不了时，绝不能把状态留在「运行中」——那就是「点了开始永远没反应」。
+      if (!bound.ready.length) {
+        b.status = G.ERROR;
+        b.startedAt = 0;
+        b.lastError = '没有可接管的 ChatGPT 标签页，请打开或刷新 chatgpt.com 后点「开始」';
+        await store.putBatch(b);
+        store.addLog('error', `开始${batchLabel(b)}失败：${bound.dead.length} 个标签页都无法接管`);
+        await store.publishView();
+        return { ok: false, error: b.lastError };
       }
-      await store.setRuntime({ activeTabs, selectedBatchId: bid });
 
-      b.windowId = secured.windowId;
       b.status = G.RUNNING;
-      b.startedAt = b.startedAt || Date.now();
+      b.startedAt = Date.now();
       b.lastClaimAt = 0;
       b.limitUntil = 0;
       b.lastError = null;
       await store.putBatch(b);
 
-      const ready = [];
-      const dead = [];
-      for (const id of secured.ids) {
-        const ok = await tabs.ensureContentScript(id);
-        (ok ? ready : dead).push(id);
-      }
-
-      store.addLog('info', `开始${batchLabel(b)}，并发 ${n}，标签页：${ready.join(', ') || '无'}`);
-      for (const id of ready) await tabs.send(id, { type: CGR.MSG.WAKE });
+      store.addLog('info', `开始${batchLabel(b)}，并发 ${n}，已接管标签页：${bound.ready.join(', ')}`);
+      for (const id of bound.ready) await tabs.send(id, { type: CGR.MSG.WAKE });
       await store.publishView();
 
-      if (dead.length) {
-        return { ok: true, tabs: ready.length, warning: `批次${batchLabel(b)}有 ${dead.length} 个标签页无法接管，请刷新对应页面后点「继续」` };
+      if (bound.dead.length) {
+        return { ok: true, tabs: bound.ready.length, warning: `批次${batchLabel(b)}有 ${bound.dead.length} 个标签页无法接管，请刷新对应页面后点「继续」` };
       }
-      return { ok: true, tabs: ready.length };
+      return { ok: true, tabs: bound.ready.length };
     });
+  }
+
+  /**
+   * 自愈：批次显示运行中、却没有标签页在领任务时，重新绑定并唤醒页面。
+   * 不加锁，由 scheduler.scan / FIX_TABS 在锁内调用。
+   */
+  async function rebindBatch(bid) {
+    const b = store.getBatch(bid);
+    if (!b || b.status !== G.RUNNING) return { ok: false, reason: 'not-running' };
+    const bound = await bindTabs(b, effectiveConcurrency(), false, false);
+    if (!bound.ready.length) return { ok: false, reason: 'no-tab' };
+    b.lastClaimAt = 0;
+    await store.putBatch(b);
+    for (const id of bound.ready) await tabs.send(id, { type: CGR.MSG.WAKE });
+    return { ok: true, tabs: bound.ready.length };
   }
 
   async function pause(bid) {
@@ -852,6 +904,7 @@
     clearFinished,
     gcImages,
     wakeBatch,
+    rebindBatch,
     maybeFinish,
     effectiveConcurrency
   };

@@ -340,10 +340,14 @@
     const counts = c.counts || {};
     const base = c.lastClaimAt || c.startedAt || 0;
     const idleFor = base ? Date.now() - base : 0;
-    const stuck = c.status === 'running' && !counts.active && counts.pending > 0 && idleFor > 15000;
+    const noTabs = !(v.runningTabIds || []).length;
+    const needsFix = c.status === 'running' || (c.status === 'error' && /标签页/.test(c.lastError || ''));
+    const stuck = needsFix && !counts.active && counts.pending > 0 && (noTabs || idleFor > 15000);
     bar.style.display = stuck ? 'flex' : 'none';
     if (stuck) {
-      $('stuckText').textContent = `批次「${c.name}」已开始 ${Math.round(idleFor / 1000)} 秒但页面还没动静。多数是扩展更新后页面里仍是旧脚本，点「立即修复」即可。`;
+      $('stuckText').textContent = noTabs
+        ? `批次「${c.name}」显示运行中，但没有绑定任何 ChatGPT 标签页（常见于扩展重载后）。点「立即修复」复用当前标签页重新接管，不会新开窗口。`
+        : `批次「${c.name}」已开始 ${Math.round(idleFor / 1000)} 秒仍没有页面来领任务，点「立即修复」重新接管；后台也会自动重试。`;
     }
   }
 
@@ -356,6 +360,9 @@
     $('btnPause').disabled = !hasBatch || !['running', 'paused', 'limit_waiting'].includes(status);
     $('btnStop').disabled = !hasBatch || !['running', 'paused', 'limit_waiting'].includes(status);
     $('btnClearFinished').disabled = !hasBatch || !((c.done || 0) + (c.failed || 0) + (c.skipped || 0) > 0);
+    $('startScope').textContent = hasBatch
+      ? `「开始」只运行队列页当前批次：${v.current.name}（待生成 ${c.pending || 0} 条）；前提页选的批次不影响这里。`
+      : '还没有批次，先点上方「＋ 新建」';
   }
 
   function renderLogs(v) {
@@ -1143,8 +1150,8 @@
       const res = await send(CGR.CMD.FIX_TABS, { batchId: curId() });
       btn.disabled = false;
       btn.textContent = '立即修复';
-      if (res.ok) toast(`已重新接管 ${res.fixed.length} 个标签页，任务接着跑`);
-      else toast(res.error || '修复失败，请手动刷新该批次的窗口');
+      if (res.ok) toast(`已重新接管 ${res.fixed.length} 个标签页${res.rebound ? '（并重新绑定批次）' : ''}，任务接着跑`);
+      else toast(res.error || '修复失败，请手动刷新 chatgpt.com');
     });
 
     // 多选
