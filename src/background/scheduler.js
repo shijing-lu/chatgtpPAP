@@ -57,7 +57,9 @@
           if (n >= 2) {
             misses.delete(id);
             await lease.reclaimByTab(id, 'tab-dead');
-            store.addLog('warn', `标签页 ${id} 连续无响应，已回收其任务`);
+            // 保留归属关系（标记 stale），否则这个标签页就再也唤不回来了
+            alive[id] = Object.assign({}, rt.activeTabs[id], { stale: true });
+            store.addLog('warn', `标签页 ${id} 连续无响应，任务已回收，正在尝试唤醒`);
           } else {
             alive[id] = rt.activeTabs[id];
           }
@@ -65,7 +67,24 @@
       }
       if (ids.length) await store.setRuntime({ activeTabs: alive });
 
-      // ③ 自愈：批次在跑但没有任务被执行、还有待办
+      // ③ 批次在跑，但它的标签页全都无响应（多半被浏览器冻结了）→ 把窗口切到前台解冻
+      for (const b of store.listBatches()) {
+        if (b.status !== G.RUNNING) continue;
+        const mine = Object.entries(alive).filter(([, v]) => v && v.batchId === b.id);
+        const anyFresh = mine.some(([tid]) => !alive[tid].stale);
+        if (mine.length && anyFresh) continue;
+        if (b.windowId == null) continue;
+        if (Date.now() - (healAt.get(b.id) || 0) < 60000) continue;
+        healAt.set(b.id, Date.now());
+        try {
+          await chrome.windows.update(b.windowId, { focused: true });
+          store.addLog('warn', `批次「${b.name}」的窗口失去响应（可能被浏览器冻结），已切到前台尝试恢复`);
+        } catch (e) {
+          /* 窗口可能已被关闭，交给下面的自愈处理 */
+        }
+      }
+
+      // ④ 自愈：批次在跑但没有任务被执行、还有待办
       for (const b of store.listBatches()) {
         if (b.status !== G.RUNNING) continue;
         const items = store.getItems(b.id);

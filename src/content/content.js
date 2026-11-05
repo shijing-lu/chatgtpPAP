@@ -16,6 +16,10 @@
   let heartbeatTimer = 0;
   let premisesApplied = false; // 当前对话是否已经发过前提设定
   let contextDead = false; // 扩展上下文已失效（页面需要刷新），此时静默退出
+  let idleWait = 15000; // 空闲轮询间隔，会被逐步退避
+  let noComposerHits = 0;
+  let lastIdleReason = '';
+  let lastIdleLogAt = 0;
 
   function send(msg) {
     if (contextDead) return Promise.resolve(null);
@@ -24,8 +28,10 @@
         chrome.runtime.sendMessage(msg, (res) => {
           if (chrome.runtime.lastError) {
             const err = String(chrome.runtime.lastError.message || '');
-            // 扩展被重载/更新后，旧页面里的脚本上下文已失效，静默退场，别和新注入的实例打架
-            if (/context invalidated|message port closed/i.test(err)) contextDead = true;
+            // 只有「扩展上下文失效」才是致命的（扩展被更新/重载，旧脚本作废）。
+            // 注意：'message port closed' 是 MV3 里 service worker 被回收时的常态，
+            // 绝不能当成致命错误 —— 否则一次正常的回收就会让整个队列永久停摆。
+            if (/context invalidated/i.test(err)) contextDead = true;
             resolve(null);
           } else {
             resolve(res);
@@ -50,6 +56,11 @@
       wakeResolve = done;
       setTimeout(done, ms);
     });
+  }
+
+  /** 后台每 30 秒扫描时会发 PING/EVALUATE，用来打断空闲等待，避免被浏览器节流拖成分钟级 */
+  function pokeIdle() {
+    if (wakeResolve) wakeResolve();
   }
 
   function startHeartbeat(token) {
@@ -127,7 +138,8 @@
       if (item.needFreshChat) {
         const ok = await composer.newChat();
         if (!ok) {
-          // 已触发整页跳转，等页面重载后由后台按刷新规则回收重派
+          // 已触发整页跳转。先把这条退了再走，别让租约白等 90 秒过期
+          await report(leaseToken, 'NAVIGATED');
           return;
         }
         premisesApplied = false; // 新对话，前提需要重新发送
@@ -209,48 +221,77 @@
   async function loop() {
     if (loopBusy) return;
     loopBusy = true;
-    let idleWait = CGR.LIMITS.idlePollMs;
-    let noComposerHits = 0;
     try {
       while (true) {
         if (contextDead) return; // 扩展已重载，本实例作废
-        if (!CGR.isChatGPT()) {
-          await waitForWork(idleWait);
-          continue;
+        try {
+          await loopOnce();
+        } catch (e) {
+          send({ type: MSG.LOG, level: 'error', message: `主循环异常：${String((e && e.message) || e)}` });
+          await waitForWork(3000);
         }
-        if (!composer.getComposer()) {
-          // 页面还没就绪（或被导航到别的页面），等一等再问；持续找不到就报一次，别让用户干等
-          noComposerHits += 1;
-          if (noComposerHits === 5 || noComposerHits % 15 === 0) {
-            send({
-              type: MSG.LOG,
-              level: 'warn',
-              message: `当前页面找不到输入框（第 ${noComposerHits} 次），任务无法开始。请确认停在 chatgpt.com 的对话页，必要时刷新页面`
-            });
-          }
-          await waitForWork(4000);
-          continue;
-        }
-        noComposerHits = 0;
-
-        const grant = await send({ type: MSG.LEASE_REQUEST, convId: CGR.getConvId() });
-        if (!grant || !grant.ok) {
-          // 没有任务时逐步退避，避免频繁唤醒后台
-          await waitForWork(idleWait);
-          idleWait = Math.min(idleWait * 2, 120000);
-          continue;
-        }
-        idleWait = CGR.LIMITS.idlePollMs;
-
-        await runLease(grant);
-
-        const cfg = grant.cfg || CGR.DEFAULTS;
-        const wait = CGR.randBetween(cfg.minDelayMs || 3000, cfg.maxDelayMs || 7000);
-        await waitForWork(wait);
       }
     } finally {
       loopBusy = false;
     }
+  }
+
+  /** 循环体的一次迭代；用 return 代替 continue，异常由外层兜住 */
+  async function loopOnce() {
+    if (!CGR.isChatGPT()) {
+      await waitForWork(idleWait);
+      return;
+    }
+
+    if (!composer.getComposer()) {
+      // 页面还没就绪（或被导航到别的页面），等一等再问；持续找不到就报一次，别让用户干等
+      noComposerHits += 1;
+      if (noComposerHits === 5 || noComposerHits % 15 === 0) {
+        send({
+          type: MSG.LOG,
+          level: 'warn',
+          message: `当前页面找不到输入框（第 ${noComposerHits} 次），任务无法开始。请确认停在 chatgpt.com 的对话页，必要时刷新页面`
+        });
+      }
+      await waitForWork(4000);
+      return;
+    }
+    noComposerHits = 0;
+
+    const grant = await send({ type: MSG.LEASE_REQUEST, convId: CGR.getConvId() });
+    if (!grant || !grant.ok) {
+      const reason = (grant && grant.reason) || 'no-response';
+      const now = Date.now();
+      if (reason !== lastIdleReason || now - lastIdleLogAt > 30000) {
+        lastIdleReason = reason;
+        lastIdleLogAt = now;
+        const label = {
+          drained: '队列里没有可领的任务',
+          idle: '批次未启动',
+          paused: '批次已暂停',
+          error: '批次处于异常状态，需要处理',
+          'limit_waiting': '限额冷却中',
+          finished: '批次已完成',
+          'no-batch': '这个标签页没有绑定批次',
+          'conv-conflict': '与另一个标签页抢同一个对话',
+          'no-response': '后台无响应（扩展可能正在重启）'
+        }[reason] || reason;
+        send({ type: MSG.LOG, level: 'info', message: `等待派发：${label}` });
+      }
+      await waitForWork(idleWait);
+      idleWait = Math.min(idleWait * 2, 120000);
+      return;
+    }
+    idleWait = CGR.LIMITS.idlePollMs;
+    lastIdleReason = '';
+    lastIdleLogAt = 0;
+
+    await runLease(grant);
+    send({ type: MSG.LOG, level: 'info', message: `#${grant.item.index + 1} 本轮结束，请求下一条` });
+
+    const cfg = grant.cfg || CGR.DEFAULTS;
+    const wait = CGR.randBetween(cfg.minDelayMs || 3000, cfg.maxDelayMs || 7000);
+    await waitForWork(wait);
   }
 
   /* ---------------- 图片取流（下载降级用） ---------------- */
@@ -328,13 +369,15 @@
     if (!msg || !msg.type) return false;
     switch (msg.type) {
       case MSG.PING:
+        pokeIdle();
         sendResponse({ ok: true, ts: Date.now() });
         return false;
       case MSG.WAKE:
-        if (wakeResolve) wakeResolve();
+        pokeIdle();
         sendResponse({ ok: true });
         return false;
       case MSG.EVALUATE:
+        pokeIdle();
         watch.triggerEvaluate();
         sendResponse({ ok: true });
         return false;
