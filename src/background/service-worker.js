@@ -168,6 +168,8 @@ async function handleCommand(msg) {
       return orch.selectBatch(p.id);
     case CGR.CMD.ADD_ITEM:
       return orch.addItem(p.batchId, p.prompt, p.refImages);
+    case CGR.CMD.ADD_ITEMS:
+      return orch.addItems(p.batchId, p.items);
     case CGR.CMD.START:
       return orch.start(p.batchId);
     case CGR.CMD.PAUSE:

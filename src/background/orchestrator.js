@@ -176,6 +176,90 @@
     });
   }
 
+  /**
+   * 批量入队（Markdown 导入用）。整批在一个锁里写完，只发布一次视图。
+   * @param {string} bid 批次 id
+   * @param {Array<{prompt:string}>} list
+   */
+  async function addItems(bid, list) {
+    return store.withLock(async () => {
+      await store.ensureLoaded();
+      let batch = store.getBatch(bid);
+      if (!batch) {
+        const first = store.listBatches()[0];
+        if (!first) return { ok: false, error: '还没有批次，请先新建一个' };
+        batch = first;
+        bid = first.id;
+      }
+
+      const incoming = Array.isArray(list) ? list : [];
+      if (!incoming.length) return { ok: false, error: '没有可导入的提示词' };
+
+      const cfg = store.getCfg();
+      const items = store.getItems(bid);
+      const room = Math.max(0, CGR.LIMITS.maxPromptsPerBatch - items.length);
+      const now = Date.now();
+
+      let added = 0;
+      let empty = 0;
+      let overLimit = 0;
+
+      for (const raw of incoming) {
+        const text = String((raw && raw.prompt) || '').trim();
+        if (!text) {
+          empty += 1;
+          continue;
+        }
+        if (added >= room) {
+          overLimit += 1;
+          continue;
+        }
+        const item = {
+          index: items.length + added,
+          batchId: bid,
+          prompt: text,
+          refImages: [],
+          status: S.PENDING,
+          attempt: 0,
+          maxAttempts: cfg.maxAttempts || 2,
+          rev: 0,
+          lease: null,
+          tabId: null,
+          image: null,
+          download: null,
+          error: null,
+          filename: '',
+          chatPrepared: false,
+          ts: { queuedAt: now }
+        };
+        await store.putItem(bid, item);
+        added += 1;
+      }
+
+      if (added) {
+        batch.count = items.length + added;
+        await store.putBatch(batch);
+      }
+      await store.publishView();
+
+      if (added) {
+        store.addLog(
+          'info',
+          `从 Markdown 导入 ${added} 条到「${batch.name}」${overLimit ? `，${overLimit} 条超出上限未加入` : ''}`
+        );
+      }
+      return {
+        ok: added > 0,
+        added,
+        empty,
+        overLimit,
+        count: items.length + added,
+        batchName: batch.name,
+        error: added ? undefined : `单个批次最多 ${CGR.LIMITS.maxPromptsPerBatch} 条，没有空间再加入`
+      };
+    });
+  }
+
   /* ---------------- 运行控制 ---------------- */
 
   async function start(bid) {
@@ -752,6 +836,7 @@
     deleteBatch,
     selectBatch,
     addItem,
+    addItems,
     start,
     pause,
     resume,
