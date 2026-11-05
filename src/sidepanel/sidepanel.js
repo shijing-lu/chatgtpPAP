@@ -501,6 +501,42 @@
     renderRefList();
   }
 
+  /** 从剪贴板里挑出图片文件 */
+  function imageFilesFrom(data) {
+    const files = [];
+    if (data.items) {
+      for (const it of data.items) {
+        if (it.kind === 'file' && /^image\//.test(it.type || '')) {
+          const f = it.getAsFile();
+          if (f) files.push(f);
+        }
+      }
+    }
+    if (!files.length && data.files) {
+      for (const f of data.files) if (/^image\//.test(f.type || '')) files.push(f);
+    }
+    return files;
+  }
+
+  function onPaste(e) {
+    const dt = e.clipboardData;
+    if (!dt) return;
+
+    const files = imageFilesFrom(dt);
+    if (!files.length) return;
+
+    // 同时带文字时不抢：让浏览器按正常文本粘贴处理，避免复制图文时被劫持
+    const el = document.activeElement;
+    const inText = el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT');
+    if (inText && (dt.getData('text/plain') || '').trim()) return;
+
+    e.preventDefault();
+    const advTab = document.querySelector('.tab[data-tab="advanced"]');
+    if (advTab && !advTab.classList.contains('active')) advTab.click();
+    handleFiles(files);
+    toast(`已粘贴 ${files.length} 张图片`);
+  }
+
   function renderRefList() {
     const box = $('refList');
     box.textContent = '';
@@ -527,7 +563,7 @@
 
     $('refHint').textContent = pendingRefs.length
       ? `已选 ${pendingRefs.length} 张，点 ＋ 加入队列后清空`
-      : '支持多选，随提示词一起入队';
+      : '可点选、拖拽，或直接 Ctrl+V 粘贴截图';
   }
 
   /* ---------------- 前提（按批次） ---------------- */
@@ -776,6 +812,9 @@
 
     $('btnPickImages').addEventListener('click', () => $('fileInput').click());
     $('fileInput').addEventListener('change', (e) => handleFiles(e.target.files));
+
+    // 直接 Ctrl+V 粘贴截图/图片
+    document.addEventListener('paste', onPaste);
 
     const advPane = $('pane-advanced');
     ['dragover', 'drop'].forEach((evt) => {

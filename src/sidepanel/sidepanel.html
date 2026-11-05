@@ -97,19 +97,19 @@
         <div class="card compose">
           <label class="lbl" for="advPrompt">提示词 + 参考图</label>
           <div class="composer-row">
-            <textarea id="advPrompt" rows="3" placeholder="输入提示词，可附加 1~4 张参考图，点右侧 ＋ 加入当前批次"></textarea>
+            <textarea id="advPrompt" rows="3" placeholder="输入提示词；参考图可点「＋ 参考图」、拖进来，或直接 Ctrl+V 粘贴，再点 ＋ 加入当前批次"></textarea>
             <button id="btnAddAdvanced" class="add-btn" title="加入当前批次">＋</button>
           </div>
 
           <div class="row gap">
             <button id="btnPickImages" class="btn small">＋ 参考图</button>
-            <span class="hint" id="refHint">支持多选，随提示词一起入队</span>
+            <span class="hint" id="refHint">可点选、拖拽，或直接 Ctrl+V 粘贴截图</span>
           </div>
           <input type="file" id="fileInput" accept="image/*" multiple hidden />
           <div class="ref-list" id="refList"></div>
 
           <div class="hint" id="advHint"></div>
-          <div class="hint">参考图会先上传到 ChatGPT 输入框，传完再发提示词；每条任务单独附加，不会被下一条复用。</div>
+          <div class="hint">参考图会先上传到 ChatGPT 输入框，传完再发提示词；每条任务单独附加，不会被下一条复用。最多 4 张。</div>
         </div>
 
         <div class="list" id="advList"></div>
