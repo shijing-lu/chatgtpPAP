@@ -60,6 +60,10 @@
             <button id="btnAddPrompt" class="add-btn" title="加入当前批次">＋</button>
           </div>
           <div class="hint" id="enqueueHint"></div>
+          <div class="row gap md-entry">
+            <button id="btnMdOpen" class="btn small">从 Markdown 导入</button>
+            <span class="hint">每个代码块 = 一条提示词</span>
+          </div>
           <div class="premise-note" id="premiseNote" style="display: none"></div>
         </div>
 
@@ -89,7 +93,7 @@
         </div>
 
         <div class="list" id="itemList"></div>
-        <div class="empty" id="emptyTip">这个批次还没有提示词。在上面输入一条，点 ＋ 加入。</div>
+        <div class="empty" id="emptyTip">这个批次还没有提示词。在上面输入一条点 ＋，或从 Markdown 导入。</div>
       </section>
 
       <!-- ========== 高级 ========== -->
@@ -226,10 +230,44 @@
       </section>
     </main>
 
+    <!-- ========== Markdown 导入 ========== -->
+    <div class="md-modal" id="mdModal">
+      <div class="md-sheet">
+        <div class="md-head">
+          <div>
+            <div class="md-title">从 Markdown 导入</div>
+            <div class="hint">每识别到一个代码块，就新增一条提示词</div>
+          </div>
+          <button id="btnMdClose" class="md-x" title="关闭">×</button>
+        </div>
+
+        <div class="md-body">
+          <div class="md-drop" id="mdDrop">
+            <div class="md-drop-text">把 <b>.md</b> 文件拖到这里</div>
+            <button id="btnMdPick" class="btn small">选择文件</button>
+            <input type="file" id="mdFile" accept=".md,.markdown,.txt,text/markdown,text/plain" hidden />
+          </div>
+
+          <label class="lbl" for="mdText">或直接粘贴 Markdown 内容</label>
+          <textarea id="mdText" rows="7" placeholder="```&#10;白色无线耳机，柔和侧光，浅景深&#10;```&#10;&#10;```&#10;黑色石英手表，深色大理石台面&#10;```"></textarea>
+
+          <div class="md-stat" id="mdStat">还没有识别到提示词</div>
+          <div class="md-warn" id="mdWarn" style="display: none"></div>
+          <div class="md-preview" id="mdPreview"></div>
+        </div>
+
+        <div class="md-foot">
+          <button id="btnMdCancel" class="btn ghost">取消</button>
+          <button id="btnMdImport" class="btn primary" disabled>导入</button>
+        </div>
+      </div>
+    </div>
+
     <div class="toast" id="toast"></div>
 
     <script src="../shared/constants.js"></script>
     <script src="../shared/slug.js"></script>
+    <script src="../shared/markdown.js"></script>
     <script src="sidepanel.js"></script>
   </body>
 </html>

@@ -839,3 +839,206 @@ select.input {
 .tabs .tab {
   padding: 7px 9px;
 }
+
+/* ---------- Markdown 导入入口 ---------- */
+.md-entry {
+  margin-top: 6px;
+  align-items: center;
+}
+
+.md-entry .hint {
+  flex: 1;
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
+/* ---------- Markdown 导入弹窗 ---------- */
+.md-modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(17, 22, 32, 0.42);
+  padding: 10px;
+  align-items: center;
+  justify-content: center;
+}
+
+.md-modal.open {
+  display: flex;
+}
+
+.md-sheet {
+  width: 100%;
+  max-height: 100%;
+  background: var(--bg);
+  border-radius: 14px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.32);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.md-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+.md-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 3px;
+}
+
+.md-x {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 18px;
+  line-height: 1;
+  border-radius: 8px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.md-x:hover {
+  background: var(--bg-soft);
+  color: var(--text);
+}
+
+.md-body {
+  padding: 12px 14px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.md-drop {
+  border: 1.5px dashed var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.md-drop.over {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.md-drop-text {
+  font-size: 11.5px;
+  color: var(--text-soft);
+  line-height: 1.5;
+}
+
+.md-drop-text b {
+  color: var(--primary);
+}
+
+#mdText {
+  width: 100%;
+  min-height: 120px;
+  resize: vertical;
+  font-family: Consolas, "Courier New", "Microsoft YaHei", monospace;
+  font-size: 11.5px;
+  line-height: 1.6;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg-card);
+  color: var(--text);
+  outline: none;
+}
+
+#mdText:focus {
+  border-color: var(--primary);
+}
+
+.md-stat {
+  font-size: 11.5px;
+  color: var(--text-soft);
+  font-weight: 600;
+}
+
+.md-stat.ok {
+  color: var(--ok);
+}
+
+.md-warn {
+  font-size: 11px;
+  line-height: 1.55;
+  color: #8a5a00;
+  background: var(--warn-soft);
+  border: 1px solid #f0ddb7;
+  border-radius: 8px;
+  padding: 7px 9px;
+}
+
+.md-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.md-prev-item {
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 7px 9px;
+  background: var(--bg-card);
+}
+
+.md-prev-top {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 3px;
+}
+
+.md-prev-idx {
+  font-size: 10px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+}
+
+.md-prev-meta {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.md-prev-text {
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-soft);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.md-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  flex: 0 0 auto;
+}
+

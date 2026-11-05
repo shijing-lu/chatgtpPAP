@@ -443,6 +443,152 @@
     }
   }
 
+  /* ---------------- Markdown 导入 ---------------- */
+
+  let mdParsed = { prompts: [], stats: {}, warnings: [] };
+  let mdTimer = 0;
+
+  function mdIsOpen() {
+    return $('mdModal').classList.contains('open');
+  }
+
+  function mdOpen() {
+    $('mdModal').classList.add('open');
+    $('mdText').focus();
+    renderMdPreview();
+  }
+
+  function mdClose() {
+    $('mdModal').classList.remove('open');
+    $('mdText').value = '';
+    $('mdFile').value = '';
+    mdParsed = { prompts: [], stats: {}, warnings: [] };
+    renderMdPreview();
+  }
+
+  function mdSchedule() {
+    clearTimeout(mdTimer);
+    mdTimer = setTimeout(renderMdPreview, 150);
+  }
+
+  function buildPreviewRow(p, i) {
+    const row = document.createElement('div');
+    row.className = 'md-prev-item';
+
+    const top = document.createElement('div');
+    top.className = 'md-prev-top';
+
+    const idx = document.createElement('span');
+    idx.className = 'md-prev-idx';
+    idx.textContent = '#' + (i + 1);
+
+    const meta = document.createElement('span');
+    meta.className = 'md-prev-meta';
+    meta.textContent = `${Array.from(p.prompt).length} 字`;
+
+    top.append(idx, meta);
+
+    const text = document.createElement('div');
+    text.className = 'md-prev-text';
+    text.textContent = p.prompt;
+
+    row.append(top, text);
+    return row;
+  }
+
+  function renderMdPreview() {
+    const raw = $('mdText').value || '';
+    const res = CGR.MD.parse(raw);
+    mdParsed = res;
+
+    const n = res.prompts.length;
+    const stat = $('mdStat');
+    const btn = $('btnMdImport');
+    const warn = $('mdWarn');
+    const box = $('mdPreview');
+
+    if (!raw.trim()) {
+      stat.className = 'md-stat';
+      stat.textContent = '还没有识别到提示词';
+    } else if (!n) {
+      stat.className = 'md-stat';
+      stat.textContent = '识别到 0 条';
+    } else {
+      stat.className = 'md-stat ok';
+      stat.textContent = `识别到 ${n} 条提示词`;
+    }
+
+    btn.disabled = n === 0;
+    btn.textContent = n ? `导入 ${n} 条` : '导入';
+
+    const warnings = res.warnings || [];
+    warn.style.display = warnings.length ? 'block' : 'none';
+    warn.textContent = warnings.join('；');
+
+    box.textContent = '';
+    const shown = res.prompts.slice(0, 8);
+    for (let i = 0; i < shown.length; i++) box.append(buildPreviewRow(shown[i], i));
+    if (n > shown.length) {
+      const more = document.createElement('div');
+      more.className = 'hint';
+      more.textContent = `…还有 ${n - shown.length} 条，导入后都在队列里`;
+      box.append(more);
+    }
+  }
+
+  async function readMdFile(file) {
+    if (!file) return;
+    const name = file.name || '';
+    const okExt = /\.(md|markdown|txt)$/i.test(name);
+    const okType = /^(text\/|application\/(x-)?markdown)/i.test(file.type || '');
+    if (!okExt && !okType) {
+      toast('只支持 .md / .markdown / .txt 文件');
+      return;
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      toast('文件超过 2MB，请拆小一点再导入');
+      return;
+    }
+    try {
+      const text = await file.text();
+      $('mdText').value = text;
+      renderMdPreview();
+      toast(`已读取 ${name}`);
+    } catch (e) {
+      toast('文件读取失败');
+    }
+    $('mdFile').value = '';
+  }
+
+  async function doImport() {
+    const list = mdParsed.prompts || [];
+    if (!list.length) return toast('没有可导入的提示词');
+
+    const bid = await ensureBatchId();
+    if (!bid) return;
+
+    const btn = $('btnMdImport');
+    btn.disabled = true;
+    const res = await send(CGR.CMD.ADD_ITEMS, {
+      batchId: bid,
+      items: list.map((p) => ({ prompt: p.prompt }))
+    });
+    btn.disabled = false;
+
+    if (!res.ok) {
+      toast(res.error || '导入失败');
+      renderMdPreview();
+      return;
+    }
+
+    const parts = [`已导入 ${res.added} 条`];
+    if (res.overLimit) parts.push(`${res.overLimit} 条超出上限未加入`);
+    if (res.empty) parts.push(`${res.empty} 条为空已跳过`);
+    toast(parts.join('，'));
+    $('enqueueHint').textContent = `已导入 ${res.added} 条，本批次共 ${res.count} 条`;
+    mdClose();
+  }
+
   /* ---------------- 参考图 ---------------- */
 
   function fileToDataUrl(file) {
@@ -523,6 +669,26 @@
     if (!dt) return;
 
     const files = imageFilesFrom(dt);
+
+    // 导入弹窗打开时，粘贴的是 Markdown：文字直接贴进输入框，文件直接读
+    if (mdIsOpen()) {
+      const file = (dt.files && dt.files[0]) || files[0] || null;
+      if (file) {
+        e.preventDefault();
+        readMdFile(file);
+        return;
+      }
+      if (document.activeElement === $('mdText')) return; // 焦点在输入框里，交给浏览器正常粘贴
+      const txt = dt.getData('text/plain') || '';
+      if (!txt.trim()) return;
+      e.preventDefault();
+      $('mdText').value = txt;
+      renderMdPreview();
+      $('mdText').focus();
+      toast('已粘贴 Markdown 内容');
+      return;
+    }
+
     if (!files.length) return;
 
     // 同时带文字时不抢：让浏览器按正常文本粘贴处理，避免复制图文时被劫持
@@ -812,6 +978,34 @@
 
     $('btnPickImages').addEventListener('click', () => $('fileInput').click());
     $('fileInput').addEventListener('change', (e) => handleFiles(e.target.files));
+
+    // Markdown 导入
+    $('btnMdOpen').addEventListener('click', mdOpen);
+    $('btnMdClose').addEventListener('click', mdClose);
+    $('btnMdCancel').addEventListener('click', mdClose);
+    $('btnMdImport').addEventListener('click', doImport);
+    $('mdText').addEventListener('input', mdSchedule);
+    $('btnMdPick').addEventListener('click', () => $('mdFile').click());
+    $('mdFile').addEventListener('change', (e) => readMdFile(e.target.files && e.target.files[0]));
+
+    const drop = $('mdDrop');
+    ['dragenter', 'dragover'].forEach((ev) => {
+      drop.addEventListener(ev, (e) => {
+        e.preventDefault();
+        drop.classList.add('over');
+      });
+    });
+    ['dragleave', 'dragend'].forEach((ev) => drop.addEventListener(ev, () => drop.classList.remove('over')));
+    drop.addEventListener('drop', (e) => {
+      e.preventDefault();
+      drop.classList.remove('over');
+      const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f) readMdFile(f);
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && mdIsOpen()) mdClose();
+    });
 
     // 直接 Ctrl+V 粘贴截图/图片
     document.addEventListener('paste', onPaste);
