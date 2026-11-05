@@ -90,20 +90,25 @@
       send({ type: MSG.LOG, level: 'info', message: `发送前提 ${i + 1}/${list.length}…` });
       await send({ type: MSG.PROGRESS, leaseToken, phase: 'sending' });
 
-      // 只关心「有没有新的一条 assistant 回复」，不看图片、也不等图片
-      const beforeN = probe.assistantCount();
       const sent = await composer.sendPrompt(list[i], cfg);
       if (!sent.ok) return { ok: false, reason: `send-failed(${sent.code})` };
 
-      const ack = await watch.waitForAck(beforeN, cfg, isAborted);
-      if (ack === 'aborted') return { ok: false, reason: 'aborted' };
-      if (ack === 'limit') return { ok: false, reason: 'limit' };
-      if (ack !== 'ok') return { ok: false, reason: `no-reply(${ack})` };
-      send({ type: MSG.LOG, level: 'info', message: `前提 ${i + 1}/${list.length} 已收到回复，继续` });
+      // 前提只是把上下文塞进对话，发出去就算完成，不等任何回复、也不看图
+      send({ type: MSG.LOG, level: 'info', message: `前提 ${i + 1} 已发送（不等回复）` });
+      if (i < list.length - 1) await CGR.sleep(1200);
     }
 
-    // 前提阶段可能顺带出图，等界面彻底静止再给正式任务拍快照，避免把前提的图认成结果
-    await CGR.sleep(1200);
+    // 仅当模型还在输出时短暂让一让输入框，避免下一条抢不到发送按钮；最多 15 秒，绝不看内容
+    if (probe.isGenerating()) {
+      const t0 = Date.now();
+      await CGR.pollUntil(() => !probe.isGenerating(), 15000, 400);
+      const waited = Date.now() - t0;
+      if (waited > 1500) {
+        send({ type: MSG.LOG, level: 'info', message: `等输入框空闲 ${Math.round(waited / 1000)} 秒后继续` });
+      }
+    }
+
+    await CGR.sleep(600);
     return { ok: true };
   }
 
