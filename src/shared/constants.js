@@ -130,7 +130,13 @@
     maxPromptsPerBatch: 2000,
     leaseTtlMs: 90000,
     heartbeatMs: 20000,
-    idlePollMs: 15000,
+    // 空闲轮询：短周期且封顶。以前从 15 秒指数退避到 120 秒，
+    // 一旦 SW 被回收丢一条消息，就会「越卡越久」，同时让 SW 更容易被回收。
+    idlePollMs: 3000,
+    idleMaxPollMs: 8000,
+    // service worker 运行期唤醒检查间隔；只在批次确实卡住时才发 WAKE
+    wakeTickMs: 5000,
+    wakeStuckMs: 15000,
     maxLogs: 400
   };
 })(typeof globalThis !== 'undefined' ? globalThis : self);

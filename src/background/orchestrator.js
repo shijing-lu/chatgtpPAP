@@ -419,9 +419,30 @@
   async function claim(tabId, convId) {
     return store.withLock(async () => {
       await store.ensureLoaded();
-      const rt = store.getRuntime();
-      const info = (rt.activeTabs || {})[tabId];
-      const bid = info && info.batchId;
+      let rt = store.getRuntime();
+      let bid = ((rt.activeTabs || {})[tabId] || {}).batchId;
+
+      // 兜底：扩展重载 / runtime 归属丢失后，别让这个标签页干等 30 秒的定时自愈。
+      // 只在「恰好一个批次在跑、有待办、且它目前没有任何绑定标签页」时就地补绑定，
+      // 避免多个标签页被同时拉进同一批次抢任务。
+      if (!bid || !store.getBatch(bid)) {
+        const running = store.listBatches().filter(
+          (x) => x.status === G.RUNNING && store.getItems(x.id).some((it) => it.status === S.PENDING)
+        );
+        if (running.length === 1) {
+          const target = running[0];
+          const alreadyBound = Object.entries(rt.activeTabs || {}).some(([, v]) => v && v.batchId === target.id);
+          if (!alreadyBound) {
+            const activeTabs = Object.assign({}, rt.activeTabs);
+            activeTabs[tabId] = Object.assign({}, activeTabs[tabId], {
+              batchId: target.id, state: 'idle', stale: false, at: Date.now()
+            });
+            await store.setRuntime({ activeTabs });
+            bid = target.id;
+            store.addLog('info', `标签页 ${tabId} 未登记，已自动归到${batchLabel(target)}继续执行`);
+          }
+        }
+      }
       if (!bid) return { ok: false, reason: 'no-batch' };
 
       const b = store.getBatch(bid);
@@ -430,10 +451,12 @@
 
       const cfg = store.getCfg();
       let item = null;
+      let consumedHint = false;
 
       if (b.hintIndex != null) {
         const hint = b.hintIndex;
         b.hintIndex = null;
+        consumedHint = true;
         const it = store.getItem(bid, hint);
         if (it && (it.status === S.PENDING || it.status === S.NEEDS_REVIEW)) {
           const now = Date.now();
@@ -457,10 +480,15 @@
       if (!item) item = await lease.grant(bid, tabId, convId);
 
       if (!item) {
-        const activeTabs = Object.assign({}, store.getRuntime().activeTabs);
-        if (activeTabs[tabId]) activeTabs[tabId].state = 'idle';
-        await store.setRuntime({ activeTabs });
-        await store.putBatch(b);
+        // 空闲轮询现在是 3 秒一次，别每次都写 storage 触发无谓的视图刷新
+        const cur = store.getRuntime();
+        const here = (cur.activeTabs || {})[tabId];
+        if (here && here.state !== 'idle') {
+          const activeTabs = Object.assign({}, cur.activeTabs);
+          activeTabs[tabId] = Object.assign({}, here, { state: 'idle' });
+          await store.setRuntime({ activeTabs });
+        }
+        if (consumedHint) await store.putBatch(b);
         return { ok: false, reason: 'drained' };
       }
 

@@ -16,7 +16,7 @@
   let heartbeatTimer = 0;
   let premisesApplied = false; // 当前对话是否已经发过前提设定
   let contextDead = false; // 扩展上下文已失效（页面需要刷新），此时静默退出
-  let idleWait = 15000; // 空闲轮询间隔，会被逐步退避
+  let idleWait = CGR.LIMITS.idlePollMs; // 空闲轮询间隔，只在小范围内退避，绝不拖到分钟级
   let noComposerHits = 0;
   let lastIdleReason = '';
   let lastIdleLogAt = 0;
@@ -123,6 +123,7 @@
     const isAborted = () => ctx.aborted;
 
     startHeartbeat(leaseToken);
+    let waitingTimer = 0;
     try {
       if (!CGR.isChatGPT()) {
         await report(leaseToken, 'NAVIGATED');
@@ -206,7 +207,19 @@
       await send({ type: MSG.PROGRESS, leaseToken, phase: 'sent' });
       send({ type: MSG.LOG, level: 'info', message: `#${item.index + 1} 已发送（${sent.method || 'auto'}），等待出图…` });
 
+      // 图片生成慢时持续报进度，用户能分清「还在等」和「卡死了」
+      const sentAt = Date.now();
+      waitingTimer = setInterval(() => {
+        send({
+          type: MSG.LOG,
+          level: 'info',
+          message: `#${item.index + 1} 仍在等待出图（已等 ${Math.round((Date.now() - sentAt) / 1000)} 秒）…`
+        });
+      }, 30000);
+
       const res = await watch.waitForOutcome(before, cfg, isAborted);
+      clearInterval(waitingTimer);
+      waitingTimer = 0;
       await report(leaseToken, res.status, {
         images: res.images,
         text: res.text,
@@ -218,6 +231,7 @@
       send({ type: MSG.LOG, level: 'error', message: `执行异常：${String((e && e.message) || e)}` });
       await report(leaseToken, 'PAGE_ERROR', { raw: String((e && e.message) || e) });
     } finally {
+      if (waitingTimer) clearInterval(waitingTimer);
       stopHeartbeat();
       if (current === ctx) current = null;
     }
@@ -265,7 +279,12 @@
     }
     noComposerHits = 0;
 
-    const grant = await send({ type: MSG.LEASE_REQUEST, convId: CGR.getConvId() });
+    // SW 冷启动时的第一条消息容易丢，立刻补一次；丢包不再被当成「要退避」的信号
+    let grant = await send({ type: MSG.LEASE_REQUEST, convId: CGR.getConvId() });
+    if (!grant) {
+      await CGR.sleep(400);
+      grant = await send({ type: MSG.LEASE_REQUEST, convId: CGR.getConvId() });
+    }
     if (!grant || !grant.ok) {
       const reason = (grant && grant.reason) || 'no-response';
       const now = Date.now();
@@ -286,7 +305,8 @@
         send({ type: MSG.LOG, level: 'info', message: `等待派发：${label}` });
       }
       await waitForWork(idleWait);
-      idleWait = Math.min(idleWait * 2, 120000);
+      // 只做小幅退避并封顶 8 秒：既不会刷屏，也保证 SW 一直被消息喂着、不会被回收
+      idleWait = Math.min(idleWait + 1500, CGR.LIMITS.idleMaxPollMs);
       return;
     }
     idleWait = CGR.LIMITS.idlePollMs;
@@ -410,13 +430,15 @@
   /* ---------------- 启动 ---------------- */
 
   async function boot() {
-    // 后台可能还没把「标签页 → 批次」的登记写完，重试几次避开竞态
-    for (let i = 0; i < 4; i++) {
-      const res = await send({ type: MSG.HELLO, url: location.href, convId: CGR.getConvId() });
-      if (res && res.batchId) break;
-      if (i < 3) await CGR.sleep(1200);
-    }
-    setTimeout(loop, 800);
+    // HELLO 必须先于主循环完成：它会回收页面刷新前遗留的旧租约。
+    // 若让 loop 先领了任务、HELLO 才到，刚领到的新任务会被当成旧租约退回。
+    // 加 3 秒上限，避免 SW 冷启动丢消息时把启动卡死。
+    await CGR.withTimeout(
+      send({ type: MSG.HELLO, url: location.href, convId: CGR.getConvId() }),
+      3000,
+      null
+    );
+    loop();
   }
 
   boot();

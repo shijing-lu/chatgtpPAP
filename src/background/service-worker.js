@@ -36,6 +36,54 @@ async function boot() {
   for (const b of store.listBatches()) {
     if (b.status === G.RUNNING) await orch.wakeBatch(b.id);
   }
+  ensureWakeTicker();
+}
+
+/* ---------------- 运行期唤醒（不依赖页面定时器） ---------------- */
+
+let wakeTimer = 0;
+const wakeRebindAt = new Map();
+
+/**
+ * 每 5 秒看一眼：某个批次有待办、没有任务在跑、又超过 15 秒没派发过，
+ * 就主动唤醒它的标签页；一个绑定标签页都没有时直接重新接管。
+ * 页面里的 setTimeout 在后台标签页会被 Chrome 节流到分钟级，所以唤醒必须由 SW 发起。
+ */
+async function wakeTick() {
+  await store.ensureLoaded();
+  const rt = store.getRuntime();
+  for (const b of store.listBatches()) {
+    if (b.status !== G.RUNNING) continue;
+    const items = store.getItems(b.id);
+    if (!items.some((it) => it.status === S.PENDING)) continue;
+    if (items.some((it) => lease.ACTIVE.includes(it.status))) continue;
+
+    // 正常的两条任务之间的间隔不打扰，只兜「确实卡住」的情况
+    const quietFor = Date.now() - (b.lastClaimAt || b.startedAt || 0);
+    if (quietFor < CGR.LIMITS.wakeStuckMs) continue;
+
+    const ids = Object.entries(rt.activeTabs || {})
+      .filter(([, v]) => v && v.batchId === b.id)
+      .map(([k]) => Number(k));
+
+    if (!ids.length) {
+      // rebind 会重新注入脚本，别每 5 秒重复来一次
+      const last = wakeRebindAt.get(b.id) || 0;
+      if (Date.now() - last < 15000) continue;
+      wakeRebindAt.set(b.id, Date.now());
+      await store.withLock(() => orch.rebindBatch(b.id));
+      continue;
+    }
+    for (const id of ids) await tabs.send(id, { type: CGR.MSG.WAKE });
+  }
+}
+
+function ensureWakeTicker() {
+  if (wakeTimer) return;
+  // SW 被回收后变量随之消失，下次任意消息都会重建这个 ticker
+  wakeTimer = setInterval(() => {
+    wakeTick().catch(() => {});
+  }, CGR.LIMITS.wakeTickMs);
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
@@ -106,7 +154,8 @@ async function onLeaseRequest(msg, sender) {
   // 同一批次内不允许两个标签页停在同一个对话
   if (convId && info) {
     for (const [tid, other] of Object.entries(rt.activeTabs || {})) {
-      if (Number(tid) !== tabId && other && other.batchId === info.batchId && other.convId === convId) {
+      // 只有「另一个标签页正忙且停在同一对话」才挡；闲置标签页不该被永久跳过
+      if (Number(tid) !== tabId && other && other.batchId === info.batchId && other.convId === convId && other.state === 'busy') {
         store.addLog('warn', `标签页 ${tabId} 与 ${tid} 处于同一对话，跳过派发`);
         return { ok: false, reason: 'conv-conflict' };
       }
@@ -313,6 +362,7 @@ async function handleCommand(msg) {
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  ensureWakeTicker();
   (async () => {
     try {
       if (!msg || (!msg.type && !msg.cmd)) return sendResponse({ ok: false, error: 'bad-message' });
@@ -386,6 +436,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
+  ensureWakeTicker();
   sched.onAlarm(alarm);
 });
 
