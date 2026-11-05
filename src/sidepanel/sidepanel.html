@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ChatGPT 批量生图助手</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <header class="hdr">
+      <div class="hdr-left">
+        <div class="logo">CG</div>
+        <div>
+          <div class="hdr-title">批量生图助手</div>
+          <div class="hdr-sub" id="batchName">尚未建立批次</div>
+        </div>
+      </div>
+      <div class="status-pill" id="statusPill">空闲</div>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="queue">队列</button>
+      <button class="tab" data-tab="premise">前提</button>
+      <button class="tab" data-tab="settings">设置</button>
+      <button class="tab" data-tab="logs">日志与诊断</button>
+    </nav>
+
+    <main>
+      <!-- 队列 -->
+      <section class="pane active" id="pane-queue">
+        <div class="card compose">
+          <label class="lbl" for="prompts">提示词（用标识符分隔，也可一行一条）</label>
+          <textarea id="prompts" placeholder="一只在雨夜霓虹街道上行走的赛博朋克猫，电影感光影&#10;---&#10;水彩风格的江南水乡清晨，薄雾，乌篷船&#10;---&#10;……"></textarea>
+          <div class="split-row">
+            <select id="splitMode" class="input">
+              <option value="auto">自动识别</option>
+              <option value="delimiter">只用标识符</option>
+              <option value="line">只用换行</option>
+            </select>
+            <input id="splitDelimiter" class="input" type="text" placeholder="分隔标识符" />
+          </div>
+          <div class="hint" id="splitHint">识别到 0 条提示词</div>
+          <div class="row">
+            <input id="batchNameInput" class="input" type="text" placeholder="批次名（作为子文件夹名）" />
+            <button id="btnEnqueue" class="btn primary">加入队列</button>
+          </div>
+          <div class="hint" id="enqueueHint"></div>
+          <div class="premise-note" id="premiseNote" style="display: none"></div>
+        </div>
+
+        <div class="card controls">
+          <div class="row gap">
+            <button id="btnStart" class="btn primary">开始</button>
+            <button id="btnPause" class="btn">暂停</button>
+            <button id="btnStop" class="btn danger">停止</button>
+            <button id="btnClearFinished" class="btn ghost" title="移除已完成/失败/跳过的条目">清理</button>
+          </div>
+          <div class="progress-wrap">
+            <div class="progress"><div class="bar" id="progressBar"></div></div>
+            <div class="progress-text" id="progressText">0 / 0</div>
+          </div>
+          <div class="chips" id="chips"></div>
+        </div>
+
+        <div class="alert-bar" id="stuckBar" style="display: none">
+          <div class="alert-text" id="stuckText"></div>
+          <button id="btnFixTabs" class="btn primary small">立即修复</button>
+        </div>
+
+        <div class="list-tools">
+          <label class="chk"><input type="checkbox" id="chkAll" /><span>全选</span></label>
+          <span class="sel-count" id="selCount">已选 0 条</span>
+          <button id="btnDeleteSelected" class="link-danger" disabled>删除选中</button>
+        </div>
+
+        <div class="list" id="itemList"></div>
+        <div class="empty" id="emptyTip">还没有任务。粘贴提示词后点「加入队列」。</div>
+      </section>
+
+      <!-- 前提设定 -->
+      <section class="pane" id="pane-premise">
+        <div class="card">
+          <div class="pane-head">
+            <div>
+              <div class="lbl">前提设定（只建立上下文，不生成图片）</div>
+              <div class="hint">每条新对话开始前会先逐条发送这些内容，等模型回复后再开始生图。前提本身不进队列、不下载、不计数。</div>
+            </div>
+            <label class="chk"><input type="checkbox" id="premiseEnabled" /><span>启用</span></label>
+          </div>
+          <textarea id="premiseText" placeholder="例如：&#10;你是一位专业的产品摄影师，接下来所有图片都遵循这个风格：柔和侧光、浅景深、高级灰背景。&#10;---&#10;所有画面不要出现文字和水印。"></textarea>
+          <div class="hint" id="premiseHint">按与队列相同的分隔规则切分 · 当前 0 条</div>
+          <div class="row">
+            <button id="btnSavePremise" class="btn primary">保存前提</button>
+            <button id="btnClearPremise" class="btn ghost">清空</button>
+          </div>
+          <div class="hint" id="premiseSaveHint"></div>
+        </div>
+        <div class="list" id="premiseList"></div>
+        <div class="empty" id="premiseEmpty">还没有前提设定。上面填写后点「保存前提」。</div>
+      </section>
+
+      <!-- 设置 -->
+      <section class="pane" id="pane-settings">
+        <div class="card">
+          <div class="field">
+            <label class="lbl" for="mode">会话策略</label>
+            <select id="mode" class="input">
+              <option value="new-chat-each">每条新开对话（推荐）</option>
+              <option value="single-chat">同一对话连续生成</option>
+              <option value="parallel">多对话并行</option>
+            </select>
+            <div class="hint">新开对话可避免前面生成的图影响后面，风格更稳定。</div>
+          </div>
+
+          <div class="field" id="concurrencyField">
+            <label class="lbl" for="concurrency">并行标签页数</label>
+            <input id="concurrency" class="input" type="number" min="1" max="3" step="1" />
+            <div class="hint">仅在「多对话并行」下生效，上限 3。并发越高越容易触发限额与风控。</div>
+          </div>
+
+          <div class="field">
+            <label class="lbl" for="folder">下载子文件夹</label>
+            <input id="folder" class="input" type="text" placeholder="chatgpt-images" />
+            <div class="hint">相对于浏览器下载目录，可写多级如 <code>AI图/客户A</code>。扩展无法写入绝对路径。</div>
+          </div>
+
+          <div class="field">
+            <label class="lbl" for="template">文件名模板</label>
+            <input id="template" class="input" type="text" placeholder="{index:03}_{slug}" />
+            <div class="hint">可用：{index}、{index:03}、{slug}、{date}、{time}、{batch}</div>
+          </div>
+
+          <div class="field two">
+            <div>
+              <label class="lbl" for="minDelayMs">间隔下限（秒）</label>
+              <input id="minDelayMs" class="input" type="number" min="1" max="120" step="1" />
+            </div>
+            <div>
+              <label class="lbl" for="maxDelayMs">间隔上限（秒）</label>
+              <input id="maxDelayMs" class="input" type="number" min="1" max="180" step="1" />
+            </div>
+          </div>
+
+          <div class="field two">
+            <div>
+              <label class="lbl" for="timeoutMs">单条超时（秒）</label>
+              <input id="timeoutMs" class="input" type="number" min="60" max="900" step="10" />
+            </div>
+            <div>
+              <label class="lbl" for="maxAttempts">失败重试次数</label>
+              <input id="maxAttempts" class="input" type="number" min="0" max="5" step="1" />
+            </div>
+          </div>
+
+          <div class="field two">
+            <div>
+              <label class="lbl" for="onNoImage">未出图时</label>
+              <select id="onNoImage" class="input">
+                <option value="retry">自动重试一次</option>
+                <option value="fail">直接标记失败</option>
+                <option value="skip">跳过</option>
+              </select>
+            </div>
+            <div>
+              <label class="lbl" for="limitCooldownMin">限额冷却（分钟）</label>
+              <input id="limitCooldownMin" class="input" type="number" min="1" max="1440" step="1" />
+            </div>
+          </div>
+
+          <div class="row">
+            <button id="btnSaveCfg" class="btn primary">保存设置</button>
+            <button id="btnResetCfg" class="btn ghost">恢复默认</button>
+          </div>
+          <div class="hint" id="cfgHint"></div>
+        </div>
+      </section>
+
+      <!-- 日志 -->
+      <section class="pane" id="pane-logs">
+        <div class="card">
+          <div class="row gap">
+            <button id="btnSelfcheck" class="btn primary">运行自检</button>
+            <button id="btnExportLogs" class="btn">导出诊断</button>
+          </div>
+          <div id="selfcheckReport" class="report"></div>
+        </div>
+        <div class="logs" id="logList"></div>
+      </section>
+    </main>
+
+    <div class="toast" id="toast"></div>
+
+    <script src="../shared/constants.js"></script>
+    <script src="../shared/slug.js"></script>
+    <script src="sidepanel.js"></script>
+  </body>
+</html>
