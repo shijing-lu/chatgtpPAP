@@ -1,0 +1,22 @@
+# 系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 依赖与构建产物
+node_modules/
+dist/
+*.zip
+*.crx
+*.pem
+
+# 编辑器
+.vscode/
+.idea/
+
+# 本地智能体工作区数据（不属于插件产物）
+.workbuddy/
+
+# 日志
+*.log
+npm-debug.log*

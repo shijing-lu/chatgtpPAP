@@ -1,0 +1,52 @@
+{
+  "manifest_version": 3,
+  "name": "ChatGPT 批量生图助手",
+  "version": "0.1.0",
+  "description": "把一批提示词交给 ChatGPT 官网逐条生图，自动检测完成并下载到指定文件夹。",
+  "minimum_chrome_version": "114",
+  "permissions": ["storage", "unlimitedStorage", "downloads", "tabs", "alarms", "sidePanel", "scripting"],
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*",
+    "https://*.oaiusercontent.com/*"
+  ],
+  "background": {
+    "service_worker": "src/background/service-worker.js"
+  },
+  "side_panel": {
+    "default_path": "src/sidepanel/sidepanel.html"
+  },
+  "action": {
+    "default_title": "ChatGPT 批量生图助手",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
+      "js": [
+        "src/shared/constants.js",
+        "src/shared/selectors.js",
+        "src/shared/slug.js",
+        "src/shared/sched.js",
+        "src/content/probes.js",
+        "src/content/composer.js",
+        "src/content/watcher.js",
+        "src/content/selfcheck.js",
+        "src/content/content.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}
