@@ -18,7 +18,9 @@
     // 发送按钮
     sendButton: [
       'button[data-testid="send-button"]',
+      'button[data-testid*="send-button"]',
       '#composer-submit-button',
+      'form button[type="submit"]',
       'button[aria-label="Send prompt"]',
       'button[aria-label*="Send"]',
       'button[aria-label*="发送"]'

@@ -32,8 +32,8 @@
   function clearComposer(el) {
     focusComposer(el);
     try {
-      document.execCommand('selectAll', false, null);
-      document.execCommand('delete', false, null);
+      const sel = window.getSelection();
+      if (sel && sel.rangeCount) sel.deleteFromDocument();
     } catch (e) {
       /* ignore */
     }
@@ -79,21 +79,112 @@
   }
 
   function pressEnter(el) {
-    const opts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
+    const opts = {
+      key: 'Enter',
+      code: 'Enter',
+      keyCode: 13,
+      which: 13,
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: window
+    };
     el.dispatchEvent(new KeyboardEvent('keydown', opts));
     el.dispatchEvent(new KeyboardEvent('keypress', opts));
     el.dispatchEvent(new KeyboardEvent('keyup', opts));
   }
 
-  function clickSend() {
-    const btn = CGR.pick(CGR.SEL.sendButton);
-    if (!btn) return false;
-    if (btn.disabled) return false;
-    btn.click();
-    return true;
+  /** 在输入框所在的 form 里找可用的发送按钮，避免误点到页面上别的按钮 */
+  function findSendButton() {
+    const el = getComposer();
+    const form = el && el.closest('form');
+    const scopes = [];
+    if (form) scopes.push(form);
+    scopes.push(document);
+
+    for (const scope of scopes) {
+      for (const sel of CGR.SEL.sendButton) {
+        let list = [];
+        try {
+          list = Array.from(scope.querySelectorAll(sel));
+        } catch (e) {
+          continue;
+        }
+        list = list.filter((b) => b.getClientRects().length > 0 || b.offsetParent !== null);
+        if (!list.length) continue;
+        const usable = list.find((b) => !b.disabled && b.getAttribute('aria-disabled') !== 'true');
+        return usable || list[0];
+      }
+    }
+    return null;
   }
 
-  /** 发送一条提示词，返回 { ok, code } */
+  /** 光 click() 有时不触发，补一套指针事件 */
+  function realClick(el) {
+    const opts = { bubbles: true, cancelable: true, view: window, button: 0 };
+    try {
+      el.click();
+    } catch (e) {
+      /* ignore */
+    }
+    try {
+      el.dispatchEvent(new PointerEvent('pointerdown', opts));
+      el.dispatchEvent(new MouseEvent('mousedown', opts));
+      el.dispatchEvent(new PointerEvent('pointerup', opts));
+      el.dispatchEvent(new MouseEvent('mouseup', opts));
+    } catch (e) {
+      /* ignore */
+    }
+  }
+
+  /**
+   * 提交：等按钮可用 → 点按钮 → 表单提交 → 回车，每一步都校验是否真的发出去了。
+   * 之前只点一次按钮就放弃，遇到按钮还处于 disable 状态时会出现「文字在框里但没发出去」。
+   * @returns {Promise<string>} 生效的方式，空串表示全部失败
+   */
+  async function submit(el) {
+    const beforeN = probe.allMsgCount();
+    const cleared = () =>
+      probe.allMsgCount() > beforeN || probe.isGenerating() || !readText(el).trim();
+
+    // 1) 等发送按钮变成可用（React 状态更新有延迟）
+    await CGR.pollUntil(() => {
+      const b = findSendButton();
+      return !!b && !b.disabled;
+    }, 3000, 120);
+
+    let btn = findSendButton();
+    if (btn && !btn.disabled) {
+      realClick(btn);
+      if (await CGR.pollUntil(cleared, 1800, 150)) return 'click';
+    }
+
+    // 2) 回车
+    pressEnter(el);
+    if (await CGR.pollUntil(cleared, 2000, 150)) return 'enter';
+
+    // 3) 表单提交（最后手段，极少数情况下会触发导航，靠租约回收兜底）
+    const form = el.closest('form');
+    if (form && typeof form.requestSubmit === 'function') {
+      try {
+        form.requestSubmit();
+      } catch (e) {
+        /* ignore */
+      }
+      if (await CGR.pollUntil(cleared, 2000, 150)) return 'requestSubmit';
+    }
+
+    // 4) 再点一次（可能是按钮刚可用）
+    btn = findSendButton();
+    if (btn && !btn.disabled) {
+      realClick(btn);
+      if (await CGR.pollUntil(cleared, 1800, 150)) return 'click-retry';
+    }
+
+    return '';
+  }
+
+  /** 发送一条提示词，返回 { ok, code, method } */
   async function sendPrompt(rawText, cfg) {
     const text = normalizeText(rawText, cfg && cfg.preserveNewlines);
     if (!text) return { ok: false, code: 'empty-prompt' };
@@ -107,7 +198,7 @@
       await CGR.sleep(120);
 
       const inserted = insertText(el, text);
-      await CGR.sleep(200);
+      await CGR.sleep(260);
 
       const inBox = readText(el).length;
       if (!inserted || inBox < Math.min(12, text.length)) {
@@ -115,22 +206,17 @@
         continue;
       }
 
-      // 优先点发送按钮；按钮不可用时用 Enter
-      const clicked = clickSend();
-      if (!clicked) {
-        pressEnter(el);
-      }
-
+      const method = await submit(el);
       const ok = await CGR.pollUntil(
         () => probe.allMsgCount() > beforeMsgs || probe.isGenerating() || readText(getComposer() || el).trim() === '',
-        6000,
+        5000,
         200
       );
 
-      if (ok) return { ok: true, sent: text };
+      if (ok) return { ok: true, sent: text, method: method || 'unknown' };
 
-      // 提交没生效，清空重来
-      await CGR.sleep(800 + attempt * 900);
+      // 提交没生效：再等一会儿，然后把输入框清空重来
+      await CGR.sleep(700 + attempt * 800);
     }
     return { ok: false, code: 'send-failed-3x' };
   }
