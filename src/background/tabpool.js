@@ -35,6 +35,60 @@
     return !!(res && res.ok);
   }
 
+  /** 页面本身还活着吗（和「有没有内容脚本」是两件事） */
+  async function pageAlive(tabId) {
+    try {
+      const r = await chrome.scripting.executeScript({ target: { tabId }, func: () => 1 });
+      return !!(r && r[0] && r[0].result === 1);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /**
+   * 硬恢复：页面活着就补注入脚本；页面本身就死了（错误页/进程崩溃）才重载。
+   * 返回 'ok' | 'reinjected' | 'reloaded' | 'gone' | 'failed'
+   */
+  async function reviveTab(tabId) {
+    let tab = null;
+    try {
+      tab = await chrome.tabs.get(tabId);
+    } catch (e) {
+      return 'gone';
+    }
+    if (!tab) return 'gone';
+
+    if (await pageAlive(tabId)) {
+      if (await ensureContentScript(tabId)) return 'reinjected';
+      return 'failed';
+    }
+
+    // 页面已经死掉（比如加载失败停在错误页），只能重新加载
+    try {
+      await chrome.tabs.reload(tabId);
+      return 'reloaded';
+    } catch (e) {
+      return 'failed';
+    }
+  }
+
+  /** 兜底：这个标签页怎么都救不回来时，换一个新的（同一窗口）继续干活 */
+  async function replaceTab(oldTabId) {
+    try {
+      const t = await chrome.tabs.get(oldTabId);
+      const created = await chrome.tabs.create({ windowId: t.windowId, url: 'https://chatgpt.com/', active: false });
+      try {
+        await chrome.tabs.remove(oldTabId);
+      } catch (e) {
+        /* 关不掉就算了 */
+      }
+      if (created && created.id != null) await harden(created.id);
+      return created ? created.id : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
   /**
    * 确保标签页里跑着「当前这次」的内容脚本。
    * 关键场景：扩展重新加载后，已经打开的 ChatGPT 标签页里仍是旧脚本（甚至已失效），
@@ -63,49 +117,62 @@
    * 为某个批次准备它自己的窗口与标签页。
    * 一个批次 = 一个独立窗口，互不干扰；窗口 id 记在批次上，下次直接复用。
    */
+  /**
+   * 为批次准备执行标签页：优先复用你已经开着的 ChatGPT 标签页，
+   * 不再动不动就新建窗口。只有确实没有可用标签页时才新建一个。
+   */
   async function ensureBatchTabs(batch, desired, focus) {
     const want = Math.max(1, Math.min(desired || 1, CGR.LIMITS.hardMaxConcurrency));
-    let windowId = batch.windowId == null ? null : batch.windowId;
-    let tabsIn = [];
+    const rt = store.getRuntime();
 
-    if (windowId != null) {
+    // ① 这个批次已经登记过的标签页，只要还活着就继续用
+    const mine = Object.entries(rt.activeTabs || {})
+      .filter(([, v]) => v && v.batchId === batch.id)
+      .map(([k]) => Number(k));
+
+    const live = [];
+    let windowId = null;
+    for (const id of mine) {
       try {
-        await chrome.windows.get(windowId);
-        tabsIn = await chrome.tabs.query({ windowId, url: MATCH });
-      } catch (e) {
-        windowId = null;
-        tabsIn = [];
-      }
-    }
-
-    if (windowId == null) {
-      const win = await chrome.windows.create({
-        url: 'https://chatgpt.com/',
-        focused: !!focus,
-        type: 'normal',
-        width: 1000,
-        height: 820
-      });
-      windowId = win.id;
-      tabsIn = (win.tabs || []).slice();
-      if (!tabsIn.length) {
-        try {
-          tabsIn = await chrome.tabs.query({ windowId });
-        } catch (e) {
-          tabsIn = [];
+        const t = await chrome.tabs.get(id);
+        if (t && /chatgpt\.com|chat\.openai\.com/.test(String(t.url || ''))) {
+          live.push(t.id);
+          if (windowId == null) windowId = t.windowId;
         }
+      } catch (e) {
+        /* 已关闭 */
       }
-      store.addLog('info', `已为批次「${batch.name}」打开独立窗口`);
     }
 
-    const ids = tabsIn.filter((t) => !t.discarded).map((t) => t.id);
-
-    for (let i = ids.length; i < want; i++) {
-      const t = await chrome.tabs.create({ windowId, url: 'https://chatgpt.com/', active: false });
-      ids.push(t.id);
+    if (live.length >= want) {
+      const picked = live.slice(0, want);
+      for (const id of picked) await harden(id);
+      return { ids: picked, windowId };
     }
 
-    const picked = ids.slice(0, want);
+    // ② 复用用户已经打开、且没被别的批次占用的 ChatGPT 标签页（优先当前活动的那个）
+    const all = await chrome.tabs.query({ url: MATCH });
+    const used = new Set(Object.keys(rt.activeTabs || {}).map(Number));
+    const free = all
+      .filter((t) => t && !used.has(t.id) && !t.discarded && !live.includes(t.id))
+      .sort((a, b) => (b.active ? 1 : 0) - (a.active ? 1 : 0));
+
+    for (const t of free) {
+      if (live.length >= want) break;
+      live.push(t.id);
+      if (windowId == null) windowId = t.windowId;
+    }
+
+    // ③ 还不够才新建标签页（建在同一个窗口里，不另开窗口）
+    for (let i = live.length; i < want; i++) {
+      const opts = { url: 'https://chatgpt.com/', active: false };
+      if (windowId != null) opts.windowId = windowId;
+      const t = await chrome.tabs.create(opts);
+      live.push(t.id);
+      if (windowId == null) windowId = t.windowId;
+    }
+
+    const picked = live.slice(0, want);
     for (const id of picked) await harden(id);
     return { ids: picked, windowId };
   }
@@ -122,5 +189,5 @@
     }
   }
 
-  root.CGR_TABS = { listTabs, usableTabs, ensureBatchTabs, resetWindow, send, ping, ensureContentScript };
+  root.CGR_TABS = { listTabs, usableTabs, ensureBatchTabs, resetWindow, send, ping, pageAlive, reviveTab, replaceTab, ensureContentScript };
 })(typeof globalThis !== 'undefined' ? globalThis : self);

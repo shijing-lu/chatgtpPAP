@@ -155,11 +155,11 @@
    * 同样以 MutationObserver 为主驱动，避免后台标签页定时器被节流。
    * @returns {Promise<'ok'|'timeout'|'limit'|'aborted'>}
    */
-  function waitForAck(beforeMsgCount, cfg, isAborted) {
+  function waitForAck(beforeAssistantCount, cfg, isAborted) {
     return new Promise((resolve) => {
       const deadline = Date.now() + Math.min(cfg.timeoutMs || 300000, cfg.premiseTimeoutMs || 120000);
       let done = false;
-      let settleAt = 0;
+      let repliedAt = 0;
       let lastRun = 0;
       let target = CGR.getMain();
 
@@ -191,14 +191,13 @@
         if (isAborted && isAborted()) return finish('aborted');
         if (probe.detectLimit()) return finish('limit');
 
-        const generating = probe.isGenerating();
-        const replied = probe.allMsgCount() > beforeMsgCount;
-
-        if (replied && !generating) {
-          if (!settleAt) settleAt = now + 1200;
-          else if (now > settleAt) return finish('ok');
-        } else {
-          settleAt = 0;
+        // 前提只要模型回话就继续，完全不关心有没有在画图
+        const replied = probe.assistantCount() > beforeAssistantCount;
+        if (replied) {
+          if (!repliedAt) repliedAt = now;
+          if (String(probe.lastAssistantText() || '').trim()) return finish('ok');
+          // 只回了一张图、没有文字，也算回话
+          if (now - repliedAt > 8000) return finish('ok');
         }
 
         if (now > deadline) return finish(replied ? 'ok' : 'timeout');

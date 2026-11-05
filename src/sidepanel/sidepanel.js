@@ -849,7 +849,7 @@
       const res = await send(CGR.CMD.START, { batchId: bid });
       if (!res.ok) toast(res.error || '启动失败');
       else if (res.warning) toast(res.warning);
-      else toast('已开始，这个批次会用自己的窗口运行');
+      else toast('已开始，就在当前这个 ChatGPT 标签页里跑');
     });
 
     $('btnPause').addEventListener('click', async () => {

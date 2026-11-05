@@ -90,7 +90,8 @@
       send({ type: MSG.LOG, level: 'info', message: `发送前提 ${i + 1}/${list.length}…` });
       await send({ type: MSG.PROGRESS, leaseToken, phase: 'sending' });
 
-      const beforeN = probe.allMsgCount();
+      // 只关心「有没有新的一条 assistant 回复」，不看图片、也不等图片
+      const beforeN = probe.assistantCount();
       const sent = await composer.sendPrompt(list[i], cfg);
       if (!sent.ok) return { ok: false, reason: `send-failed(${sent.code})` };
 

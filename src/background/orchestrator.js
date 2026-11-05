@@ -263,9 +263,12 @@
       b.limitUntil = 0;
       await store.putBatch(b);
 
+      // 保留标签页归属：下次「开始」直接复用这个窗口，不重复开新窗口
       const rt = store.getRuntime();
       const activeTabs = Object.assign({}, rt.activeTabs);
-      for (const tid of ids) delete activeTabs[tid];
+      for (const tid of ids) {
+        if (activeTabs[tid]) activeTabs[tid] = Object.assign({}, activeTabs[tid], { state: 'idle', at: Date.now() });
+      }
       await store.setRuntime({ activeTabs });
 
       for (const tid of ids) await tabs.send(tid, { type: CGR.MSG.ABORT });

@@ -59,7 +59,33 @@
             await lease.reclaimByTab(id, 'tab-dead');
             // 保留归属关系（标记 stale），否则这个标签页就再也唤不回来了
             alive[id] = Object.assign({}, rt.activeTabs[id], { stale: true });
-            store.addLog('warn', `标签页 ${id} 连续无响应，任务已回收，正在尝试唤醒`);
+
+            let url = '';
+            try {
+              const t = await chrome.tabs.get(id);
+              url = t.url || '';
+            } catch (e) {
+              url = '';
+            }
+            if (!url) {
+              delete alive[id];
+              store.addLog('warn', `标签页 ${id} 已不存在，已从批次中移除`);
+            } else {
+              const how = await tabs.reviveTab(id);
+              if (how === 'reinjected' || how === 'reloaded') {
+                store.addLog('warn', `标签页 ${id} 连续无响应（${url.slice(0, 50)}）→ ${how === 'reinjected' ? '已重新注入脚本' : '已重载页面'}`);
+              } else {
+                // 彻底救不回来：换一个新的标签页顶替，别让整个批次停在这
+                const nid = await tabs.replaceTab(id);
+                if (nid) {
+                  delete alive[id];
+                  alive[nid] = Object.assign({}, info, { stale: false, at: Date.now() });
+                  store.addLog('warn', `标签页 ${id} 无法恢复，已换用新标签页 ${nid} 继续`);
+                } else {
+                  store.addLog('error', `标签页 ${id} 无法恢复且无法替换，请手动刷新该批次的窗口`);
+                }
+              }
+            }
           } else {
             alive[id] = rt.activeTabs[id];
           }
@@ -101,7 +127,8 @@
           if (!info || info.batchId !== b.id) continue;
           const id = Number(tid);
           if (await tabs.ping(id)) continue;
-          if (await tabs.ensureContentScript(id)) {
+          const how = await tabs.reviveTab(id);
+          if (how === 'reinjected' || how === 'reloaded') {
             injected += 1;
             await tabs.send(id, { type: CGR.MSG.WAKE });
           }
