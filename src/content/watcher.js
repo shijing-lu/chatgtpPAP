@@ -71,12 +71,16 @@
       };
 
       const freshAll = (anchor) => {
-        const strict = probe.freshImages(before, anchor, false);
-        const loose = probe.freshImages(before, anchor, true);
-        const bySrc = new Map();
-        for (const f of strict) bySrc.set(f.src, f);
-        for (const f of loose) if (!bySrc.has(f.src)) bySrc.set(f.src, f);
-        return Array.from(bySrc.values());
+        // 统一产物：内嵌 <img>、图片链接、文件附件卡片都在内。
+        // 严格 + 宽松各扫一遍，按 kind+src 去重，严格结果优先。
+        const byKey = new Map();
+        for (const loose of [false, true]) {
+          for (const a of probe.freshArtifacts(before, anchor, loose)) {
+            const key = a.kind + ':' + probe.normSrc(a.src);
+            if (!byKey.has(key)) byKey.set(key, a);
+          }
+        }
+        return Array.from(byKey.values());
       };
 
       const evaluate = () => {
@@ -117,8 +121,13 @@
 
         const baseMsgs = before.msgCount || 0;
         const baseAssistant = before.assistantCount || 0;
+        // 消息节点的选择器也可能改版（日志里出现过「消息=0」）。
+        // 新链接 / 新附件卡片 / 正文明显变长，同样说明回复已经到了。
         const replied =
-          probe.allMsgCount() > baseMsgs || probe.assistantCount() > baseAssistant || !!candidate;
+          probe.allMsgCount() > baseMsgs ||
+          probe.assistantCount() > baseAssistant ||
+          probe.artifactSignal(before) ||
+          !!candidate;
 
         // 页面报错只在「确实没收到任何回复」时才当失败；出了新消息/新图就不能据此重发
         const pageErr = probe.detectPageError();
@@ -148,8 +157,11 @@
         }
 
         const fresh = freshAll(anchor);
+        // 文件链接 / 附件卡片一旦出现就是最终交付物，不会再像 <img> 那样换高清版本，
+        // 不需要等满图片的稳定窗口，但依然要等回复结束（避免抓到生成中的占位）。
+        const hasFileArtifact = fresh.some((f) => f.kind !== 'img');
         if (fresh.length) {
-          const sig = fresh.map((f) => sigOf(f.src)).sort().join('|');
+          const sig = fresh.map((f) => f.kind + ':' + sigOf(f.src)).sort().join('|');
           if (!candidate) {
             candidate = { sig, srcs: fresh, firstSeenAt: now, lastSeenAt: now, hits: 1, sigChanges: 0 };
           } else {
@@ -163,13 +175,15 @@
             }
           }
           const stableFor = now - candidate.firstSeenAt;
+          const requiredStable = hasFileArtifact ? Math.min(stableMs, 2500) : stableMs;
           // 图都稳定 15 秒以上了，就不该再被一个失效的状态选择器拖到超时
           const settledAnyway = !generating && stableFor >= Math.max(15000, stableMs * 5);
-          if (candidate.hits >= 2 && stableFor >= stableMs && (replyEnded || settledAnyway)) {
+          if (candidate.hits >= 2 && stableFor >= requiredStable && (replyEnded || settledAnyway)) {
             return finish({
               status: 'IMAGE_READY',
               images: candidate.srcs,
               loose: candidate.srcs.some((f) => f.loose),
+              kinds: candidate.srcs.map((f) => f.kind),
               sigChanges: candidate.sigChanges
             });
           }
@@ -178,17 +192,39 @@
           candidate = null;
         }
 
-        // 判「未出图」前，已经给过图片足够时间，并做最后一次宽松扫描
-        if (!fresh.length && !candidate && replyEnded) {
-          const sinceEnd = genEndAt ? now - genEndAt : quietFor;
-          if (sinceEnd >= imageGraceMs) {
+        const sinceEnd = genEndAt ? now - genEndAt : quietFor;
+
+        // 产物已经出现、回复也结束了，只是稳定条件一直没凑齐：
+        // 宽限期一到就按「已出图」交付，绝不能拖到 TIMEOUT 或 NO_IMAGE。
+        if (candidate && replyEnded && sinceEnd >= imageGraceMs) {
+          return finish({
+            status: 'IMAGE_READY',
+            images: candidate.srcs,
+            loose: candidate.srcs.some((f) => f.loose),
+            kinds: candidate.srcs.map((f) => f.kind),
+            sigChanges: candidate.sigChanges,
+            phase: 'grace-timeout'
+          });
+        }
+
+        // 判「未出图」前，已经给过产物足够时间，并做最后一次宽松扫描（含链接与附件卡片）
+        if (!fresh.length && !candidate && replyEnded && sinceEnd >= imageGraceMs) {
+          const lastLook = freshAll(anchor);
+          if (lastLook.length) {
             return finish({
-              status: 'NO_IMAGE',
-              text: probe.lastAssistantText(),
-              diagnostic: probe.diagnose(before),
-              phase: sawGenerating ? 'after-generation' : 'dom-quiet'
+              status: 'IMAGE_READY',
+              images: lastLook,
+              loose: lastLook.some((f) => f.loose),
+              kinds: lastLook.map((f) => f.kind),
+              phase: 'final-loose-scan'
             });
           }
+          return finish({
+            status: 'NO_IMAGE',
+            text: probe.lastAssistantText(),
+            diagnostic: probe.diagnose(before),
+            phase: sawGenerating ? 'after-generation' : 'dom-quiet'
+          });
         }
 
         if (now > deadline) {

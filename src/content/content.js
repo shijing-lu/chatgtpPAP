@@ -242,17 +242,18 @@
 
       if (res.status === 'IMAGE_READY') {
         const n = (res.images || []).length;
+        const kinds = Array.isArray(res.kinds) ? Array.from(new Set(res.kinds)).join('/') : '';
         send({
           type: MSG.LOG,
           level: 'info',
-          message: `#${item.index + 1} 检测到 ${n} 张图${res.loose ? '（宽松规则命中：图片 URL 规则可能已改版）' : ''}，交给后台下载`
+          message: `#${item.index + 1} 检测到 ${n} 个产物（${kinds || 'img'}${res.loose ? '，含宽松规则命中' : ''}），交给后台下载`
         });
       } else if (res.diagnostic) {
         const d = res.diagnostic;
         send({
           type: MSG.LOG,
           level: 'warn',
-          message: `#${item.index + 1} ${res.status} 页面实况：img ${d.totalImgs} / 新增 ${d.freshImgs} / 规则命中 ${d.strictHits} / canvas ${d.canvases} / 消息 ${d.msgNodes} / 停止按钮 ${d.stopHit ? '命中' : '未命中'}`
+          message: `#${item.index + 1} ${res.status} 页面实况：img ${d.totalImgs} / 新增 ${d.freshImgs} / 规则命中 ${d.strictHits} / 链接 ${d.freshLinks || 0} / 附件 ${d.fileCards || 0} / canvas ${d.canvases} / 消息 ${d.msgNodes} / 停止按钮 ${d.stopHit ? '命中' : '未命中'}`
         });
         for (const s of d.samples || []) {
           send({ type: MSG.LOG, level: 'warn', message: `  ↳ ${s}` });
@@ -340,11 +341,12 @@
           error: '批次处于异常状态，需要处理',
           'limit_waiting': '限额冷却中',
           finished: '批次已完成',
-          'no-batch': '这个标签页没有绑定批次',
+          'no-batch': '这个标签页未绑定批次（多标签页时以执行页为准）',
           'conv-conflict': '与另一个标签页抢同一个对话',
           'no-response': '后台无响应（扩展可能正在重启）'
         }[reason] || reason;
-        send({ type: MSG.LOG, level: 'info', message: `等待派发：${label}` });
+        const extra = reason === 'no-batch' && grant && grant.activeBatch ? `（「${grant.activeBatch}」在另一个标签页执行）` : '';
+        send({ type: MSG.LOG, level: 'info', message: `等待派发：${label}${extra}` });
       }
       await waitForWork(idleWait);
       // 只做小幅退避并封顶 8 秒：既不会刷屏，也保证 SW 一直被消息喂着、不会被回收
@@ -392,16 +394,47 @@
     return '';
   }
 
-  async function fetchAndUpload(index, src, batchId) {
+  /** 让 ChatGPT 自己下载附件文件。绝不点「查看原图」这类 http 外链：
+   * 那会在当前页导航或开新标签页，用户明确不允许。sandbox: / 卡片按钮才走这里。 */
+  function clickAttachment(src, label) {
+    if (/^https?:\/\//i.test(src || '')) return false;
+    const el = probe.findClickTarget(src, label);
+    if (!el || !el.click) return false;
+    try {
+      if (el.setAttribute) {
+        el.setAttribute('target', '_self');
+        // 让 <a> 走下载而不是预览/导航；对 button 无副作用
+        if (el.tagName === 'A' && !(el.hasAttribute && el.hasAttribute('download'))) el.setAttribute('download', '');
+      }
+      el.click();
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  async function fetchAndUpload(index, src, batchId, opts) {
+    const detail = opts || {};
     try {
       let dataUrl = '';
       let mime = 'image/png';
       try {
+        // sandbox: / card: 这类伪协议 fetch 不了，直接跳到点击兜底
+        if (!/^(blob:|https?:|data:)/i.test(src || '')) throw new Error('unsupported-scheme');
         const res = await fetch(src, { credentials: 'include' });
+        if (res.ok === false) throw new Error(`http-${res.status}`);
         const blob = await res.blob();
         mime = blob.type || mime;
         dataUrl = await blobToDataUrl(blob);
       } catch (e) {
+        if (detail.click && clickAttachment(src, detail.label)) {
+          send({
+            type: MSG.LOG,
+            level: 'info',
+            message: `#${index + 1} 已点击页面附件，由后台把下载归位到批次目录（不会新开标签页）`
+          });
+          return;
+        }
         dataUrl = canvasExtract(src);
         if (!dataUrl) throw e;
       }
@@ -455,7 +488,11 @@
         sendResponse({ ok: true });
         return false;
       case 'FETCH_IMAGE':
-        fetchAndUpload(msg.index, msg.src, msg.batchId);
+        fetchAndUpload(msg.index, msg.src, msg.batchId, {
+          label: msg.label,
+          kind: msg.kind,
+          click: msg.click
+        });
         sendResponse({ ok: true });
         return false;
       case MSG.SELFCHECK:

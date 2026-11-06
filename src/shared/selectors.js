@@ -59,7 +59,17 @@
     ],
 
     // 提示/报错容器
-    alert: ['[role="alert"]', '.text-token-text-error', '[data-testid*="toast"]']
+    alert: ['[role="alert"]', '.text-token-text-error', '[data-testid*="toast"]'],
+
+    // 文件产物：新版 ChatGPT 会把生成结果作为「文件附件卡片 / 查看原图链接」返回，
+    // 页面上完全没有 <img>。这些只作为候选入口，是否算产物由 probes.js 的内容规则判定。
+    artifactLink: ['a[href]'],
+    fileCard: [
+      '[data-testid*="file" i]',
+      '[data-testid*="attachment" i]',
+      '[role="button"]',
+      'button'
+    ]
   };
 
   /* 生成图 URL 的「高置信」特征，只用于排序与诊断，不再作为「是不是图」的硬门槛。
@@ -77,6 +87,13 @@
     /image[-_]?gen/i,
     /\/assets?\/.*(?:image|img)/i
   ];
+
+  /* 文件产物判定用的内容规则。注意：这里刻意不依赖具体 testid ——
+   * ChatGPT 的附件卡片结构每次改版都变，稳定的是「图片扩展名 / 文件服务 URL / 图片语义文字」。 */
+  CGR.FILE_EXT_RE = /\.(png|jpe?g|webp|gif|avif|bmp|tiff?)(?:[?#]|$)/i;
+  CGR.FILE_URL_RE = /(^sandbox:|\/mnt\/data\/|backend-api\/(?:.*\/)?(?:download|content|estuary|files?)|\/files?\/download|oaiusercontent\.com|\/attachments?\/)/i;
+  CGR.IMAGE_WORD_RE = /(png|jpe?g|webp|gif|avif|图像|图片|原图|高清|image)/i;
+  CGR.VIEW_IMAGE_RE = /(查看|高清|原图|放大|下载|download|view (?:full|original)|open (?:full|original)|\d{3,4}\s*[×x]\s*\d{3,4})/i;
 
   CGR.pick = function (candidates, scope) {
     const rootEl = scope || document;

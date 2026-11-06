@@ -118,6 +118,20 @@
       out.push(item(`imgSample${i}`, `页面图片 ${i + 1}`, true, samples[i], ''));
     }
 
+    // 新版 ChatGPT 会把结果作为「xxx.png 附件卡片 / 查看原图链接」返回，页面里没有 <img>。
+    // 自检必须能单独报出这类产物，否则用户看到的全是 0，无法判断是没出图还是识别不了。
+    const linkHits = probe.linkArtifacts(null, null, true).length;
+    const cardHits = probe.cardArtifacts(null, null, true).length;
+    out.push(
+      item(
+        'fileArtifact',
+        '文件产物识别（链接 / 附件）',
+        true,
+        `当前页面：图片链接 ${linkHits} / 附件卡片 ${cardHits}`,
+        '出图后若是「xxx.png 图像」附件卡片而这里为 0，说明附件结构改版了；把卡片文字发给开发者即可定位'
+      )
+    );
+
     const generating = probe.isGenerating();
     const stopHit = !!CGR.pick(CGR.SEL.stopButton);
     out.push(

@@ -1,10 +1,13 @@
-/* 页面状态探测：生成中 / 图片快照 / 限额 / 报错 / 登录墙。
+/* 页面状态探测：生成中 / 产物快照 / 限额 / 报错 / 登录墙。
  *
- * 重要：不要把「URL 白名单」当成「图片是不是生成图」的硬门槛。
- * ChatGPT 前端改版时图片域名、路径、渲染方式（blob / data / 签名 CDN）随时会变，
- * 白名单一定漏检，而漏检会直接导致「明明出图了却判未出图 → 重发提示词 → 重复生图」。
- * 真正稳定可靠的判据是：发送前拍一张全页面快照，发送后只认「新出现的大图」，
- * 再用尺寸、位置、alt 排除头像/图标/装饰图。URL 白名单只用于排序与诊断。 */
+ * 「产物」不只是 <img>。ChatGPT 至少有三种交付生成结果的方式：
+ *   ① 内嵌 <img>（DALL·E / 图片消息）
+ *   ② 图片链接（「查看 4K 高清原图」、backend-api / oaiusercontent 直链）
+ *   ③ 文件附件卡片（如 xxx.png / 「图像」，页面里连一个 <img> 都没有）
+ * 只扫 <img> 会把 ②③ 判成「未出图」，进而重发提示词 → 重复生图。
+ * 所以这里统一产出 artifact 数组，判定层与下载层共用同一种结构。
+ *
+ * 稳定判据仍然是「发送前快照 → 发送后新出现」，URL 白名单只用于排序与诊断。 */
 (function (root) {
   const CGR = root.CGR;
 
@@ -37,7 +40,7 @@
     if (/^blob:/i.test(src)) return true;
     if (/^data:/i.test(src)) return /^data:image\/(?!svg)/i.test(src);
     if (CGR.IMG_PATTERNS.some((re) => re.test(src))) return true;
-    return /^https?:\/\//i.test(src) && /\.(png|jpe?g|webp|gif|avif|bmp)(?:[?#]|$)/i.test(src);
+    return /^https?:\/\//i.test(src) && CGR.FILE_EXT_RE.test(src);
   }
 
   const CHROME_RE = /(^|[\s_-])(avatar|icon|logo|sprite|emoji|spinner)([\s_-]|$)/i;
@@ -47,6 +50,15 @@
   function normSrc(src) {
     if (/^data:/i.test(src)) return `data:${src.length}:${src.slice(0, 64)}`;
     return String(src).split('#')[0].split('?')[0];
+  }
+
+  function bodyTextLen() {
+    try {
+      const t = document.body && document.body.innerText;
+      return t ? String(t).length : 0;
+    } catch (e) {
+      return 0;
+    }
   }
 
   /**
@@ -83,22 +95,240 @@
     return true;
   }
 
-  /** 快照：记录整个 document 的所有 img src，而不是只记「白名单命中的图」。
-   * 否则新图的 URL 一旦不在白名单里，差集会失效或误把旧图算成新图。 */
+  /* ---------------- 文件产物（链接 / 附件卡片） ---------------- */
+
+  const BAD_SCHEME_RE = /^(javascript:|mailto:|about:|#|data:text\/)/i;
+  // 卡片文本是「xxx.png 图像」——扩展名后面跟的是空格/中文，不是 URL 的 ?# 或结尾。
+  // 用单独的文件名规则，否则截图里那种附件卡片会被 FILE_EXT_RE 直接漏掉。
+  const FILE_NAME_RE = /\.(png|jpe?g|webp|gif|avif|bmp|tiff?)(?:$|[^a-z0-9])/i;
+
+  /** 收集候选链里的全部节点（不去重选择器链，避免第一个命中就丢掉后面的候选） */
+  function allNodes(selList) {
+    const out = [];
+    for (const sel of selList || []) {
+      if (out.length >= 400) break; // 长对话里 button 可能有几百个，封顶避免每次判定拖慢页面
+      try {
+        const list = document.querySelectorAll(sel);
+        if (list && list.length) for (const el of list) {
+          out.push(el);
+          if (out.length >= 400) break;
+        }
+      } catch (e) {
+        /* 无效选择器忽略 */
+      }
+    }
+    return out;
+  }
+
+  function nodeText(el) {
+    try {
+      return String((el && (el.innerText || el.textContent)) || '').trim().slice(0, 200);
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function rawHref(el) {
+    if (!el || !el.getAttribute) return '';
+    try {
+      return String(el.getAttribute('href') || '').trim();
+    } catch (e) {
+      return '';
+    }
+  }
+
+  /** sandbox: 保持原样（页面自己会解析），其余相对路径补成绝对 URL 才能交给下载 API */
+  function absoluteHref(raw) {
+    if (!raw || /^sandbox:/i.test(raw)) return raw;
+    try {
+      return new URL(raw, location.href).href;
+    } catch (e) {
+      return raw;
+    }
+  }
+
+  function inExcludedArea(el) {
+    if (!el || !el.closest) return false;
+    try {
+      return (
+        !!el.closest('[data-message-author-role="user"]') ||
+        !!el.closest('nav, aside, header, footer, [data-testid*="sidebar" i], [data-testid*="nav" i]')
+      );
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function afterAnchor(anchor, el) {
+    if (!anchor || !document.contains || !document.contains(anchor)) return true;
+    if (!el || !el.compareDocumentPosition || !anchor.compareDocumentPosition) return true;
+    try {
+      // FOLLOWING 表示 el 排在 anchor 之后 —— 用来排除用户上传的参考图和旧回复
+      return !!(anchor.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
+    } catch (e) {
+      return true;
+    }
+  }
+
+  /** 链接置信度：3=明确的图片文件，2=文件服务链接且带图片语义，1=「查看原图」类文字线索，0=不是产物 */
+  function linkScore(href, text) {
+    const h = String(href || '').trim();
+    const t = String(text || '').trim();
+    if (!h || BAD_SCHEME_RE.test(h)) return 0;
+    const ext = CGR.FILE_EXT_RE.test(h);
+    const fileUrl = CGR.FILE_URL_RE.test(h);
+    const imageWord = CGR.IMAGE_WORD_RE.test(t) || CGR.IMAGE_WORD_RE.test(h);
+    const viewHint = CGR.VIEW_IMAGE_RE.test(t);
+    if (ext && (fileUrl || imageWord || viewHint || /^https?:\/\//i.test(h))) return 3;
+    if (fileUrl && (imageWord || viewHint)) return 2;
+    if (/^sandbox:/i.test(h) && imageWord) return 2;
+    if (viewHint && imageWord && /^https?:\/\//i.test(h)) return 1;
+    return 0;
+  }
+
+  function cardSig(text, href) {
+    return `card:${normSrc(String(text || '').slice(0, 120))}:${normSrc(href || '')}`;
+  }
+
+  /** 卡片自身的 href，或它内部第一个链接的 href；快照与差集必须用同一套算法 */
+  function cardHref(el) {
+    let href = rawHref(el);
+    if (href || !el.querySelector) return href;
+    try {
+      const inner = el.querySelector('a[href]');
+      if (inner) href = rawHref(inner);
+    } catch (e) {
+      /* ignore */
+    }
+    return href;
+  }
+
+  /** 新出现的图片文件链接 */
+  function linkArtifacts(before, afterNode, loose) {
+    const out = [];
+    const seen = new Set();
+    const threshold = loose ? 1 : 2;
+    for (const el of allNodes(CGR.SEL.artifactLink)) {
+      const raw = rawHref(el);
+      if (!raw || BAD_SCHEME_RE.test(raw)) continue;
+      const score = linkScore(raw, nodeText(el));
+      if (score < threshold) continue;
+      if (inExcludedArea(el)) continue;
+      const src = absoluteHref(raw);
+      const key = normSrc(src);
+      if (seen.has(key)) continue;
+      if (before && before.links && before.links.has(key)) continue;
+      if (!afterAnchor(afterNode, el)) continue;
+      seen.add(key);
+      out.push({
+        src,
+        raw,
+        w: 0,
+        h: 0,
+        kind: 'link',
+        score,
+        label: nodeText(el).slice(0, 100),
+        known: isImageSrc(src),
+        loose: score < 2,
+        // 非 http(s) 的链接（sandbox:）下载 API 用不了，需要页面内取流或点击
+        click: !/^https?:\/\//i.test(src)
+      });
+    }
+    return out;
+  }
+
+  /** 新出现的文件附件卡片（截图里「static_linked_list_4k.png / 图像」那种） */
+  function cardArtifacts(before, afterNode, loose) {
+    const out = [];
+    const seen = new Set();
+    for (const el of allNodes(CGR.SEL.fileCard)) {
+      const text = nodeText(el);
+      if (!FILE_NAME_RE.test(text) || !CGR.IMAGE_WORD_RE.test(text)) continue;
+      if (inExcludedArea(el)) continue;
+      const href = cardHref(el);
+      const sig = cardSig(text, href);
+      if (seen.has(sig)) continue;
+      if (before && before.cards && before.cards.has(sig)) continue;
+      if (!afterAnchor(afterNode, el)) continue;
+      seen.add(sig);
+      const src = href ? absoluteHref(href) : `card:${encodeURIComponent(text.slice(0, 80))}`;
+      out.push({
+        src,
+        raw: href,
+        w: 0,
+        h: 0,
+        kind: 'card',
+        score: 2,
+        label: text.slice(0, 100),
+        known: isImageSrc(src),
+        loose: !!loose,
+        click: true
+      });
+    }
+    return out;
+  }
+
+  /** 找可点击的附件目标，供页面内「点一下让 ChatGPT 自己下载」兜底使用。
+   * 优先带 download / 指向图片文件的元素，避开「查看原图」这类会开新标签的外链。 */
+  function findClickTarget(src, label) {
+    const links = allNodes(CGR.SEL.artifactLink);
+    const wanted = normSrc(src || '');
+    if (wanted && wanted.indexOf('card:') !== 0) {
+      const exact = links.find((el) => normSrc(absoluteHref(rawHref(el))) === wanted);
+      if (exact && !inExcludedArea(exact) && !/(查看|view|open)/i.test(nodeText(exact))) return exact;
+    }
+
+    const cards = allNodes(CGR.SEL.fileCard).filter((el) => {
+      const t = nodeText(el);
+      return FILE_NAME_RE.test(t) && CGR.IMAGE_WORD_RE.test(t) && !inExcludedArea(el);
+    });
+    const byLabel = label ? cards.find((el) => nodeText(el).indexOf(label) >= 0) : null;
+    const withDownload = cards.find((el) => el.hasAttribute && el.hasAttribute('download'));
+    const withFileHref = cards.find((el) => CGR.FILE_EXT_RE.test(rawHref(el)) || CGR.FILE_URL_RE.test(rawHref(el)));
+    const chosen = byLabel || withDownload || withFileHref || cards[0];
+    if (!chosen) return null;
+    if (chosen.tagName === 'A' || chosen.tagName === 'BUTTON' || (chosen.getAttribute && chosen.getAttribute('role') === 'button')) {
+      return chosen;
+    }
+    try {
+      const inner = chosen.querySelector && chosen.querySelector('a[href], button, [role="button"]');
+      if (inner) return inner;
+    } catch (e) {
+      /* ignore */
+    }
+    return chosen;
+  }
+
+  /** 快照：记录整个 document 的 img / 链接 / 附件卡片签名，而不是只记「白名单命中的图」。 */
   function snapshot() {
     const imgs = new Set();
     for (const img of document.querySelectorAll('img')) {
       const src = img.currentSrc || img.src || '';
       if (src) imgs.add(normSrc(src));
     }
-    return { imgs, msgCount: allMsgCount(), assistantCount: assistantCount(), convId: CGR.getConvId() };
+    const links = new Set();
+    for (const el of allNodes(CGR.SEL.artifactLink)) {
+      const raw = rawHref(el);
+      if (raw) links.add(normSrc(absoluteHref(raw)));
+    }
+    const cards = new Set();
+    for (const el of allNodes(CGR.SEL.fileCard)) {
+      const text = nodeText(el);
+      if (FILE_NAME_RE.test(text)) cards.add(cardSig(text, cardHref(el)));
+    }
+    return {
+      imgs,
+      links,
+      cards,
+      textLen: bodyTextLen(),
+      msgCount: allMsgCount(),
+      assistantCount: assistantCount(),
+      convId: CGR.getConvId()
+    };
   }
 
-  /**
-   * 与快照做差集，返回新出现的候选图。扫描范围是整个 document（很多新版 UI 把
-   * 生成图 portal 到 main 之外），靠尺寸/位置规则降噪。
-   * afterNode 非空时只接受出现在该节点之后的图片 —— 用来排除用户上传的参考图。
-   */
+  /** 与快照做差集，返回新出现的内嵌图候选。扫描整个 document，
+   * 靠尺寸/位置规则降噪；afterNode 非空时只接受出现在该节点之后的图片。 */
   function freshImages(before, afterNode, loose) {
     const out = [];
     const seen = new Set();
@@ -109,10 +339,7 @@
       if (seen.has(key)) continue;
       if (before && before.imgs && before.imgs.has(key)) continue;
       if (!isLikelyGenerated(img, loose)) continue;
-      if (afterNode && document.contains(afterNode)) {
-        const pos = afterNode.compareDocumentPosition(img);
-        if (!(pos & Node.DOCUMENT_POSITION_FOLLOWING)) continue;
-      }
+      if (!afterAnchor(afterNode, img)) continue;
       seen.add(key);
       out.push({
         src,
@@ -123,6 +350,32 @@
       });
     }
     return out;
+  }
+
+  /** 统一产物入口：内嵌图 > 图片链接 > 文件卡片。判定层只认这个。 */
+  function freshArtifacts(before, afterNode, loose) {
+    const out = [];
+    const seen = new Set();
+    const push = (a) => {
+      if (!a || !a.src) return;
+      const key = a.kind + ':' + normSrc(a.src);
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(a);
+    };
+    for (const f of freshImages(before, afterNode, loose)) push(Object.assign({}, f, { kind: 'img', click: false }));
+    for (const f of linkArtifacts(before, afterNode, loose)) push(f);
+    for (const f of cardArtifacts(before, afterNode, loose)) push(f);
+    return out;
+  }
+
+  /** 消息节点选择器改版时，仍要靠「新链接 / 新附件卡片 / 正文变长」判断回复已到达 */
+  function artifactSignal(before) {
+    if (!before) return false;
+    const partial = { links: before.links, cards: before.cards };
+    if (linkArtifacts(partial, null, false).length) return true;
+    if (cardArtifacts(partial, null, false).length) return true;
+    return before.textLen != null && bodyTextLen() - before.textLen > 80;
   }
 
   /** 判「未出图」之前，把页面实况留证，日志里能一眼看出是识别问题还是真没出图 */
@@ -145,6 +398,9 @@
         return String(s).slice(0, 90);
       }
     };
+    const links = linkArtifacts(before, null, true);
+    const cards = cardArtifacts(before, null, true);
+    const artifacts = freshArtifacts(before, null, true);
     return {
       totalImgs: all.length,
       freshImgs: freshAll.length,
@@ -155,7 +411,14 @@
       msgNodes: allMsgCount(),
       generating: isGenerating(),
       stopHit: !!CGR.pick(CGR.SEL.stopButton),
-      samples: freshAll.slice(0, 4).map((f) => `${f.nw}x${f.nh} ${f.rw}px ${short(f.src)}`)
+      freshLinks: links.length,
+      fileCards: cards.length,
+      artifactHits: artifacts.length,
+      samples: freshAll
+        .slice(0, 4)
+        .map((f) => `${f.nw}x${f.nh} ${f.rw}px ${short(f.src)}`)
+        .concat(links.slice(0, 3).map((f) => `链接 s${f.score} ${short(f.src)} ${f.label}`))
+        .concat(cards.slice(0, 3).map((f) => `附件 ${f.label} ${short(f.src)}`))
     };
   }
 
@@ -194,8 +457,14 @@
     isImageSrc,
     normSrc,
     isLikelyGenerated,
+    linkScore,
     snapshot,
     freshImages,
+    freshArtifacts,
+    linkArtifacts,
+    cardArtifacts,
+    findClickTarget,
+    artifactSignal,
     diagnose,
     detectLimit,
     detectPageError
