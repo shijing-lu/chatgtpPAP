@@ -63,6 +63,21 @@
     loadPromise = (async () => {
       const data = await chrome.storage.local.get([K.CFG, K.RUNTIME, K.INDEX, K.LOG, 'batch']);
       S.cfg = Object.assign({}, CGR.DEFAULTS, data[K.CFG] || {});
+      // v0.4.4 之前默认「未出图时=自动重试」。一旦误判就会重发提示词、重复生图。
+      // 对已保存的旧配置做一次性迁移，用户仍可在设置里主动改回自动重试。
+      const savedCfg = data[K.CFG] || {};
+      if (savedCfg.onNoImage === 'retry' && !savedCfg.noImagePolicyConfirmed) {
+        S.cfg.onNoImage = 'review';
+        S.cfg.noImagePolicyConfirmed = true;
+        await chrome.storage.local.set({ [K.CFG]: S.cfg });
+        // load() 还没结束时不要用 addLog（它会触发定时发布视图），直接进内存日志
+        S.logs.push({
+          t: Date.now(),
+          level: 'warn',
+          message: '已将「未出图时」改为「标记待确认，不重发」，避免误判导致重复生图；如需自动重试可在设置里改回',
+          meta: null
+        });
+      }
       S.runtime = Object.assign(defaultRuntime(), data[K.RUNTIME] || {});
       S.logs = Array.isArray(data[K.LOG]) ? data[K.LOG] : [];
       S.batches.clear();

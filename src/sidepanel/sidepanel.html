@@ -206,10 +206,12 @@
             <div>
               <label class="lbl" for="onNoImage">未出图时</label>
               <select id="onNoImage" class="input">
-                <option value="retry">自动重试一次</option>
+                <option value="review">标记待确认，不重发（推荐）</option>
+                <option value="retry">自动重发提示词重试</option>
                 <option value="fail">直接标记失败</option>
                 <option value="skip">跳过</option>
               </select>
+              <div class="hint">自动重发会再生成一张图；误判时优先用「待确认」人工核对。</div>
             </div>
             <div>
               <label class="lbl" for="limitCooldownMin">限额冷却（分钟）</label>

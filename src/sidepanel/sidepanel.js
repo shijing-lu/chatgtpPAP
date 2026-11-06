@@ -916,7 +916,7 @@
     $('maxDelayMs').value = Math.round((cfg.maxDelayMs || 7000) / 1000);
     $('timeoutMs').value = Math.round((cfg.timeoutMs || 300000) / 1000);
     $('maxAttempts').value = cfg.maxAttempts == null ? 2 : cfg.maxAttempts;
-    $('onNoImage').value = cfg.onNoImage || 'retry';
+    $('onNoImage').value = cfg.onNoImage || 'review';
     $('limitCooldownMin').value = cfg.limitCooldownMin || 60;
     toggleConcurrency();
     settingsDirty = false;

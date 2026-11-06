@@ -113,7 +113,9 @@
     timeoutMs: 300000,
     stableMs: 3000,
     maxAttempts: 2,
-    onNoImage: 'retry', // retry | fail | skip
+    // review | retry | fail | skip
+    // 默认 review：判「未出图」时不再自动重发提示词，避免误判导致反复消耗生图额度
+    onNoImage: 'review',
     limitCooldownMin: 60,
     autoStartNextTabDelayMs: 2000,
 
