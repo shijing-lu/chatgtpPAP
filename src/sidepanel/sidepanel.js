@@ -979,6 +979,38 @@
     }
   }
 
+  /* ---------------- 一键重置 ---------------- */
+
+  async function doReset(scope, btn) {
+    if (btn) btn.disabled = true;
+    const res = await send(CGR.CMD.RESET, { scope });
+    if (btn) btn.disabled = false;
+    if (!res.ok) {
+      toast(res.error || '重置失败');
+      const hint = $('resetHint');
+      if (hint) hint.textContent = res.error || '重置失败';
+      return;
+    }
+
+    // 表单里的旧值不该挡住重置后的新视图
+    selected.clear();
+    listSignature = '';
+    batchSig = '';
+    batchDirty = false;
+    settingsDirty = false;
+
+    const hint = $('resetHint');
+    if (scope === CGR.RESET_SCOPE.FACTORY) {
+      toast(`已清空全部数据，已新建空批次「${res.batch && res.batch.name}」`);
+      if (hint) hint.textContent = `已删除 ${res.deletedBatches} 个批次、${res.deletedItems} 条提示词，设置已恢复默认。`;
+    } else {
+      toast(`已重置：${res.requeued} 条任务退回待生成、清除 ${res.tabsCleared} 个标签页绑定；提示词全部保留，点「开始」即可`);
+      if (hint) {
+        hint.textContent = `已完成：${res.batches} 个批次回到空闲，${res.items} 条提示词全部保留${res.ready ? `，已接管 ${res.ready} 个现有标签页` : ''}。`;
+      }
+    }
+  }
+
   /* ---------------- 事件 ---------------- */
 
   function bind() {
@@ -1152,6 +1184,14 @@
       btn.textContent = '立即修复';
       if (res.ok) toast(`已重新接管 ${res.fixed.length} 个标签页${res.rebound ? '（并重新绑定批次）' : ''}，任务接着跑`);
       else toast(res.error || '修复失败，请手动刷新 chatgpt.com');
+    });
+
+    // 一键重置：主按钮直接执行（不删任何数据）；清空全部数据需要再点一次确认
+    $('btnReset').addEventListener('click', () => doReset(CGR.RESET_SCOPE.RUNTIME, $('btnReset')));
+    $('btnReset2').addEventListener('click', () => doReset(CGR.RESET_SCOPE.RUNTIME, $('btnReset2')));
+    $('btnFactoryReset').addEventListener('click', () => {
+      armConfirm($('btnFactoryReset'), () => doReset(CGR.RESET_SCOPE.FACTORY));
+      toast('将删除全部批次与提示词，再点一次确认');
     });
 
     // 多选

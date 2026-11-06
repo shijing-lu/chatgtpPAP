@@ -73,6 +73,7 @@
             <button id="btnPause" class="btn">暂停</button>
             <button id="btnStop" class="btn danger">停止</button>
             <button id="btnClearFinished" class="btn ghost" title="移除已完成/失败/跳过的条目">清理</button>
+            <button id="btnReset" class="btn" title="停止所有批次、清掉卡住的租约与标签页绑定，把未完成的任务退回待生成；提示词、前提和设置全部保留">一键重置</button>
           </div>
           <div class="hint" id="startScope">还没有批次</div>
           <div class="progress-wrap">
@@ -224,6 +225,23 @@
             <button id="btnResetCfg" class="btn ghost">恢复默认</button>
           </div>
           <div class="hint" id="cfgHint"></div>
+        </div>
+
+        <div class="card danger-zone">
+          <div class="lbl">维护 / 一键重置</div>
+          <div class="hint">
+            卡住、批次异常中断、前提发不出去时点「一键重置」：停止所有批次，清掉残留租约、标签页绑定与连续失败计数，
+            把生成中 / 失败 / 待确认的任务退回待生成，并重新接管当前已打开的 ChatGPT 标签页（不会新开标签页）。
+            <b>提示词、前提设定、下载目录和设置全部保留</b>，重置后直接点「开始」即可。已完成的图不会重跑。
+          </div>
+          <div class="row gap">
+            <button id="btnReset2" class="btn primary">一键重置</button>
+            <button id="btnFactoryReset" class="btn danger">清空全部数据</button>
+          </div>
+          <div class="hint">
+            「清空全部数据」= 恢复出厂设置：删除所有批次、提示词、前提、参考图与日志，设置恢复默认，并新建一个空批次。需再点一次确认。
+          </div>
+          <div class="hint" id="resetHint"></div>
         </div>
       </section>
 

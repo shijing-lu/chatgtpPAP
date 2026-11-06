@@ -173,6 +173,11 @@ main {
   flex: 0 0 auto;
 }
 
+.card.danger-zone {
+  border-color: #f0c8c8;
+  background: var(--danger-soft, #fff8f8);
+}
+
 .lbl {
   font-size: 11px;
   color: var(--text-soft);
