@@ -26,12 +26,15 @@
       'button[aria-label*="发送"]'
     ],
 
-    // 停止生成按钮（存在即表示正在生成）
+    // 停止生成按钮（存在即表示正在生成）。前端改版时按钮 testid 常变，多留几个候选
     stopButton: [
       'button[data-testid="stop-button"]',
+      'button[data-testid*="stop-button"]',
+      'button[data-testid*="stop" i]',
       'button[aria-label*="Stop generating"]',
       'button[aria-label*="Stop"]',
-      'button[aria-label*="停止"]'
+      'button[aria-label*="停止"]',
+      'button[data-state="stop"]'
     ],
 
     // 新建对话
@@ -59,11 +62,20 @@
     alert: ['[role="alert"]', '.text-token-text-error', '[data-testid*="toast"]']
   };
 
-  // 生成图 src 的匹配规则
+  /* 生成图 URL 的「高置信」特征，只用于排序与诊断，不再作为「是不是图」的硬门槛。
+   * ChatGPT 改版时图片域名/路径随时会变，靠白名单判图必然漏检 —— 真正可靠的是
+   * 「发送前快照 -> 发送后新出现的大图」这个差集，见 probes.js。 */
   CGR.IMG_PATTERNS = [
     /backend-api\/estuary\/content/,
     /\/files\/download/,
-    /oaiusercontent\.com/
+    /oaiusercontent\.com/,
+    /backend-api\/files?\//i,
+    /\/backend-api\/.*(?:image|attachment|asset)/i,
+    /\/attachments?\//i,
+    /cdn\.openai\.com/i,
+    /cdn\.oaiusercontent/i,
+    /image[-_]?gen/i,
+    /\/assets?\/.*(?:image|img)/i
   ];
 
   CGR.pick = function (candidates, scope) {

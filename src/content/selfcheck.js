@@ -73,17 +73,47 @@
     out.push(item('main', '对话容器 main', !!main, main ? '已找到' : '未找到', '对话容器缺失会导致无法检测出图'));
 
     let imgHits = 0;
-    if (main) {
-      for (const img of main.querySelectorAll('img')) {
-        const s = img.currentSrc || img.src || '';
-        if (probe.isImageSrc(s)) imgHits += 1;
-      }
+    let looseHits = 0;
+    const samples = [];
+    for (const img of document.querySelectorAll('img')) {
+      const s = img.currentSrc || img.src || '';
+      if (probe.isImageSrc(s)) imgHits += 1;
+      if (probe.isLikelyGenerated(img, true)) looseHits += 1;
+      if (s && samples.length < 3) samples.push(`${img.naturalWidth || 0}x${img.naturalHeight || 0} ${s.slice(0, 70)}`);
     }
     out.push(
-      item('imgrule', '图片识别规则', imgHits > 0, imgHits ? `当前对话中命中 ${imgHits} 张图` : '当前对话还没有图片，无法验证（首次出图后可再自检）', '若出图后此处仍为 0，说明图片 URL 规则变了，请更新 CGR.IMG_PATTERNS')
+      item(
+        'imgrule',
+        '图片识别（URL 规则）',
+        true,
+        imgHits ? `命中 ${imgHits} 张` : '未命中 URL 白名单（不影响识别，仍会按「新出现的大图」判定）',
+        '出图后这里为 0 表示 ChatGPT 换了图片域名，属于正常，宽松规则会兜住'
+      )
     );
+    out.push(
+      item(
+        'looseRule',
+        '图片识别（宽松规则）',
+        true,
+        looseHits ? `当前页面有 ${looseHits} 张合格大图` : '当前页面还没有合格大图（出图后再自检可验证）',
+        '若网页已经出图但这里仍是 0，把下面几条 src 发给开发者即可定位'
+      )
+    );
+    for (let i = 0; i < samples.length; i++) {
+      out.push(item(`imgSample${i}`, `页面图片 ${i + 1}`, true, samples[i], ''));
+    }
 
     const generating = probe.isGenerating();
+    const stopHit = !!CGR.pick(CGR.SEL.stopButton);
+    out.push(
+      item(
+        'stopbutton',
+        '停止生成按钮选择器',
+        true,
+        stopHit ? '命中（生成状态可判定）' : '当前未命中；空闲时正常，生成中若也不命中说明前端改版，已由 DOM 静默兜底',
+        '选择器失效不会导致误判出图，但会让判定多等几秒'
+      )
+    );
     out.push(item('generating', '是否正在生成', true, generating ? '当前正在生成中，任务会等待其结束' : '当前空闲', ''));
 
     const limit = probe.detectLimit();
