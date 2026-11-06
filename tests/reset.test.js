@@ -98,6 +98,7 @@ const chrome = {
   alarms: { create: () => {}, onAlarm: noopListener },
   downloads: {
     onChanged: noopListener,
+    onDeterminingFilename: noopListener,
     download: () => {
       downloadCount += 1;
       return Promise.resolve(999);

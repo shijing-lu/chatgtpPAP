@@ -102,7 +102,7 @@ const chrome = {
   },
   windows: { update: () => Promise.resolve({}) },
   alarms: { create: () => {}, onAlarm: noopListener },
-  downloads: { onChanged: noopListener }
+  downloads: { onChanged: noopListener, onDeterminingFilename: noopListener }
 };
 
 global.chrome = chrome;
@@ -244,7 +244,7 @@ const markRunning = (bid, ageMs) => store.withLock(async () => {
   const grantE = await orch.claim(lone.id, 'conv-1');
   assert.strictEqual(grantE.ok, true, '归属丢失时应就地补绑定并直接派发');
   assert.strictEqual(store.getRuntime().activeTabs[lone.id].batchId, bidE, '应就地补绑定');
-  assert.ok(store.getLogs().some((l) => /未登记，已自动归到/.test(l.message)));
+  assert.ok(store.getLogs().some((l) => /未登记.*已自动归到/.test(l.message)));
   console.log('PASS E: 标签页归属丢失时 claim 就地补绑定');
 
   /* 两个批次同时跑时不自动补绑定，避免多个标签页抢任务 */
