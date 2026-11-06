@@ -334,6 +334,9 @@
       b.lastClaimAt = 0;
       b.limitUntil = 0;
       b.lastError = null;
+      // 手动点「开始/继续」是一次全新的尝试，清掉之前的连续失败计数
+      b.premiseFailStreak = 0;
+      sendFailStreak = 0;
       await store.putBatch(b);
 
       store.addLog('info', `开始${batchLabel(b)}，并发 ${n}，已接管标签页：${bound.ready.join(', ')}`);
@@ -381,6 +384,9 @@
       if (!store.getItems(bid).some((it) => it.status === S.PENDING)) return { ok: false, error: '没有待生成的任务' };
       b.status = G.RUNNING;
       b.limitUntil = 0;
+      b.lastError = null;
+      b.premiseFailStreak = 0;
+      sendFailStreak = 0;
       await store.putBatch(b);
       await wakeBatch(bid);
       store.addLog('info', `${batchLabel(b)}继续执行`);
@@ -677,6 +683,11 @@
         item.image = { src: best.src, w: best.w || 0, h: best.h || 0, kind };
         item.ts = Object.assign({}, item.ts, { imageAt: Date.now() });
         sendFailStreak = 0;
+        const okBatch = store.getBatch(bid);
+        if (okBatch && okBatch.premiseFailStreak) {
+          okBatch.premiseFailStreak = 0;
+          await store.putBatch(okBatch);
+        }
 
         if (kind === 'blob') {
           await finalize(item, S.DOWNLOADING);
@@ -722,14 +733,38 @@
       }
 
       if (status === 'PREMISE_FAILED') {
-        await finalize(item, S.PENDING, { chatPrepared: false });
-        const b = store.getBatch(bid);
-        if (b) {
-          b.status = G.ERROR;
-          b.lastError = `前提设定发送失败（${data.reason || '未知原因'}），请检查前提内容后点「开始」重试`;
-          await store.putBatch(b);
+        // 前提只是文本上下文，不生图、不消耗额度：失败时自动退回收拾状态再重试，
+        // 而不是一次失败就把整个批次打成「异常中断」让用户手动救。
+        // 但必须限次，否则页面结构真坏了会无限重发前提、把对话塞满。
+        const lines = Array.isArray(data.diagnostic) ? data.diagnostic : [];
+        for (const line of lines.slice(-4)) {
+          store.addLog('warn', `#${item.index + 1} 前提诊断：${line}`, { index: item.index });
         }
-        store.addLog('error', `前提设定发送失败：${data.reason || ''}，${batchLabel(store.getBatch(bid))}已暂停`);
+        const b = store.getBatch(bid);
+        const streak = ((b && b.premiseFailStreak) || 0) + 1;
+
+        if (streak >= 3) {
+          await finalize(item, S.NEEDS_REVIEW, {
+            chatPrepared: false,
+            error: { code: 'PREMISE_FAILED', message: `前提连续 ${streak} 次发送失败，已停止自动重试` }
+          });
+          await bumpStat(bid, 'needsReview');
+          if (b) {
+            b.premiseFailStreak = streak;
+            b.status = G.PAUSED;
+            b.lastError = `前提发送失败：${data.reason || '未知原因'}；看日志里的「前提诊断」，处理后点「继续」`;
+            await store.putBatch(b);
+          }
+          store.addLog('error', `前提连续 ${streak} 次发送失败（${data.reason || ''}），批次已暂停，不会无限重发`);
+        } else {
+          item.premiseAttempts = (item.premiseAttempts || 0) + 1;
+          await finalize(item, S.PENDING, { chatPrepared: false });
+          if (b) {
+            b.premiseFailStreak = streak;
+            await store.putBatch(b);
+          }
+          store.addLog('warn', `前提发送失败（${data.reason || ''}），第 ${streak}/3 次自动重试，批次保持运行`);
+        }
         return { ok: true };
       }
 
@@ -750,16 +785,20 @@
 
       if (status === 'SEND_FAILED') {
         sendFailStreak += 1;
+        const lines = Array.isArray(data.diagnostic) ? data.diagnostic : [];
+        for (const line of lines.slice(-4)) {
+          store.addLog('warn', `#${item.index + 1} 发送诊断：${line}`, { index: item.index });
+        }
         await handleRetryable(item, 'SEND_FAILED', cfg);
         if (sendFailStreak >= 2) {
           await lease.releaseBatch(bid, 'stop');
           const b = store.getBatch(bid);
           if (b) {
-            b.status = G.ERROR;
-            b.lastError = '连续发送失败，页面结构可能已变化，请点「自检」排查';
+            b.status = G.PAUSED;
+            b.lastError = `连续 ${sendFailStreak} 次发送失败（${data.code || ''}）；看日志里的「发送诊断」，处理后点「继续」`;
             await store.putBatch(b);
           }
-          store.addLog('error', '连续 2 次发送失败，已中止。建议运行自检');
+          store.addLog('error', `连续 ${sendFailStreak} 次发送失败，批次已暂停（可直接点「继续」，无需重建批次）`);
         }
         return { ok: true };
       }
