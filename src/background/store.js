@@ -330,6 +330,35 @@
     return S.logs.slice();
   }
 
+  function clearLogs() {
+    if (logTimer) {
+      clearTimeout(logTimer);
+      logTimer = 0;
+    }
+    S.logs = [];
+    return chrome.storage.local.remove(K.LOG);
+  }
+
+  /**
+   * 恢复出厂设置：清掉 chrome.storage.local 里的全部数据，并把内存缓存一起重置。
+   * 调用方必须持有 withLock，且之后要重新 publishView()。
+   */
+  async function factoryReset() {
+    await chrome.storage.local.clear();
+    await clearLogs(); // 同时取消尚未落盘的日志写入定时器，避免旧日志被写回来
+    S.cfg = Object.assign({}, CGR.DEFAULTS);
+    S.runtime = defaultRuntime();
+    S.batches.clear();
+    S.items.clear();
+    S.loaded = true;
+    await chrome.storage.local.set({
+      [K.CFG]: S.cfg,
+      [K.RUNTIME]: S.runtime,
+      [K.INDEX]: []
+    });
+    return { ok: true };
+  }
+
   /* ---------------- 视图 ---------------- */
 
   let viewTimer = 0;
@@ -448,6 +477,8 @@
     allItems,
     addLog,
     getLogs,
+    clearLogs,
+    factoryReset,
     publishView,
     scheduleView,
     countsOf,

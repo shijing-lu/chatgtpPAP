@@ -335,6 +335,11 @@ async function handleCommand(msg) {
       await store.publishView();
       return { ok: true, fixed, rebound: rebind };
     }
+    case CGR.CMD.RESET: {
+      // 清掉唤醒节留，避免重置后旧的重绑时间戳继续影响自愈
+      wakeRebindAt.clear();
+      return orch.reset({ scope: p.scope });
+    }
     case CGR.CMD.EXPORT_LOGS: {
       const b = store.getBatch(p.batchId);
       return {

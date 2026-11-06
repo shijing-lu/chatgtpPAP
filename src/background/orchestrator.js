@@ -420,6 +420,145 @@
     });
   }
 
+  /* ---------------- 一键重置 ---------------- */
+
+  // 需要退回「待生成」的状态：进行中的、卡在待确认的、以及失败的。
+  // 已完成 / 已跳过保持原样，避免重置把已经下载好的图又重跑一遍。
+  const RESET_BACK = [S.CLAIMED, S.SENDING, S.GENERATING, S.DOWNLOADING, S.NEEDS_REVIEW, S.FAILED];
+
+  /**
+   * 一键重置。
+   * runtime（默认）：只清运行态，批次 / 提示词 / 前提 / 下载目录 / 设置全部保留。
+   * factory：清空 chrome.storage.local 全部数据，恢复默认设置并建一个空批次。
+   */
+  async function reset(opts) {
+    const scope = opts && opts.scope === CGR.RESET_SCOPE.FACTORY ? CGR.RESET_SCOPE.FACTORY : CGR.RESET_SCOPE.RUNTIME;
+    return store.withLock(async () => {
+      await store.ensureLoaded();
+
+      const rt = store.getRuntime();
+      const boundIds = Object.keys(rt.activeTabs || {}).map(Number);
+      const batches = store.listBatches();
+      let totalItems = 0;
+      for (const b of batches) totalItems += store.getItems(b.id).length;
+
+      // ① 先让页面里正在跑的循环停下。之后即便旧结果上报回来，
+      //    租约已清空，handleOutcome 找不到 token，不会把状态又改回去。
+      const touched = new Set(boundIds);
+      try {
+        for (const t of await tabs.usableTabs()) touched.add(t.id);
+      } catch (e) {
+        /* ignore */
+      }
+      for (const id of touched) await tabs.send(id, { type: CGR.MSG.ABORT });
+
+      // ② 内存里的辅助状态也要清，否则残留的下载映射 / 失联计数会立刻把旧状态「复活」
+      sendFailStreak = 0;
+      try {
+        dl.clearCache();
+      } catch (e) {
+        /* ignore */
+      }
+      try {
+        tabs.resetWindow();
+      } catch (e) {
+        /* ignore */
+      }
+      try {
+        if (root.CGR_SCHED && root.CGR_SCHED.reset) root.CGR_SCHED.reset();
+      } catch (e) {
+        /* ignore */
+      }
+      try {
+        const all = await chrome.storage.local.get(null);
+        const dkeys = Object.keys(all).filter((k) => k.indexOf('dl:') === 0);
+        if (dkeys.length) await chrome.storage.local.remove(dkeys);
+      } catch (e) {
+        /* ignore */
+      }
+
+      if (scope === CGR.RESET_SCOPE.FACTORY) {
+        await store.factoryReset();
+        const fresh = await store.createBatch('批次 1');
+        store.addLog(
+          'info',
+          `已清空全部数据并恢复出厂设置：删除 ${batches.length} 个批次、${totalItems} 条提示词，已新建空批次「${fresh.name}」`
+        );
+        await store.publishView();
+        return {
+          ok: true,
+          scope,
+          deletedBatches: batches.length,
+          deletedItems: totalItems,
+          batch: { id: fresh.id, name: fresh.name }
+        };
+      }
+
+      // ③ 只重置运行态。attempt 必须清零，否则 maxAttempts 会继续拦着，重置等于没重置。
+      let requeued = 0;
+      for (const b of batches) {
+        for (const it of store.getItems(b.id)) {
+          if (RESET_BACK.indexOf(it.status) >= 0) {
+            it.status = S.PENDING;
+            it.attempt = 0;
+            it.lease = null;
+            it.tabId = null;
+            it.error = null;
+            it.image = null;
+            it.download = null;
+            it.chatPrepared = false;
+            it.lastOutcomeToken = null;
+            it.ts = null;
+            await store.putItem(b.id, it);
+            requeued += 1;
+          } else if (it.lease || it.tabId != null || it.lastOutcomeToken) {
+            it.lease = null;
+            it.tabId = null;
+            it.lastOutcomeToken = null;
+            await store.putItem(b.id, it);
+          }
+        }
+        b.status = G.IDLE;
+        b.startedAt = 0;
+        b.lastClaimAt = 0;
+        b.limitUntil = 0;
+        b.lastError = null;
+        b.windowId = null;
+        b.premiseFailStreak = 0;
+        b.stats = { done: 0, failed: 0, needsReview: 0, skipped: 0 };
+        await store.putBatch(b);
+      }
+
+      await store.setRuntime({ activeTabs: {}, selectedBatchId: rt.selectedBatchId || '' });
+
+      // ④ 顺手重新注入当前已打开的 ChatGPT 标签页（只复用，绝不新开），
+      //    扩展重载后点一次重置就能直接点「开始」，不必再刷新页面或点「立即修复」。
+      let ready = 0;
+      try {
+        for (const t of await tabs.usableTabs()) {
+          if (await tabs.ensureContentScript(t.id)) ready += 1;
+        }
+      } catch (e) {
+        /* ignore */
+      }
+
+      store.addLog(
+        'info',
+        `一键重置完成：${batches.length} 个批次回到空闲、${requeued} 条任务退回待生成、清除 ${boundIds.length} 个标签页绑定${ready ? `、已接管 ${ready} 个现有标签页` : ''}；提示词 / 前提 / 设置全部保留`
+      );
+      await store.publishView();
+      return {
+        ok: true,
+        scope,
+        batches: batches.length,
+        items: totalItems,
+        requeued,
+        tabsCleared: boundIds.length,
+        ready
+      };
+    });
+  }
+
   /* ---------------- 租约派发 ---------------- */
 
   async function claim(tabId, convId) {
@@ -639,6 +778,9 @@
       const token = msg.leaseToken;
       const item = token ? lease.findByToken(token) : null;
       if (!item) {
+        // 一键重置已清掉租约；页面随后补发的 ABORTED / NAVIGATED 属于预期残留，
+        // 直接确认即可，免得前端有限重试把日志刷屏。
+        if (msg.status === 'ABORTED' || msg.status === 'NAVIGATED') return { ok: true, ignored: true };
         // 前端重试上报时，后台可能已处理完并清掉租约。必须回 ok，
         // 否则前端会一直重发到日志刷屏（也更不能重复触发下载）。
         return findByOutcomeToken(token) ? { ok: true, duplicate: true } : { ok: false, error: 'lease-not-found' };
@@ -1050,6 +1192,7 @@
     pause,
     resume,
     stop,
+    reset,
     claim,
     handleOutcome,
     heartbeat,

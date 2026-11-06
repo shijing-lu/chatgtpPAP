@@ -180,5 +180,11 @@
     });
   }
 
-  root.CGR_SCHED = { ALARM, ensure, scan, onAlarm };
+  /** 一键重置时清掉标签页失联计数与自愈节留，避免旧状态立刻又把批次拉回去 */
+  function reset() {
+    misses.clear();
+    healAt.clear();
+  }
+
+  root.CGR_SCHED = { ALARM, ensure, scan, onAlarm, reset };
 })(typeof globalThis !== 'undefined' ? globalThis : self);

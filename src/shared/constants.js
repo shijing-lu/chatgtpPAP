@@ -97,7 +97,14 @@
     SELFCHECK: 'SELFCHECK',
     EXPORT_LOGS: 'EXPORT_LOGS',
     FIX_TABS: 'FIX_TABS',
-    OPEN_ITEM_TAB: 'OPEN_ITEM_TAB'
+    OPEN_ITEM_TAB: 'OPEN_ITEM_TAB',
+    RESET: 'RESET'
+  };
+
+  // 一键重置的两种范围：runtime 只清运行态（保留全部数据），factory 恢复出厂设置
+  CGR.RESET_SCOPE = {
+    RUNTIME: 'runtime',
+    FACTORY: 'factory'
   };
 
   CGR.DEFAULTS = {
