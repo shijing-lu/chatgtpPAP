@@ -251,6 +251,46 @@ function outcome(token, status, data) {
   assert.strictEqual(store.getCfg().noImagePolicyConfirmed, true, '只迁移一次');
   console.log('PASS G: 旧配置自动迁移到安全的默认策略');
 
+  /* H：前提发送失败不再一次就把整个批次打成「异常中断」 */
+  bid = await setup();
+  const diag = ['发送前：页面可发送（idle）', '第1次：提交未生效（only-stop-button）｜输入框=有/框内20字/生成中=是'];
+  for (let i = 0; i < 3; i++) {
+    token = await claim(bid);
+    await outcome(token, 'PREMISE_FAILED', { reason: 'send-failed(only-stop-button)', diagnostic: diag });
+    if (i < 2) {
+      assert.strictEqual(store.getBatch(bid).status, 'running', `第${i + 1}次失败后批次应仍在运行`);
+      assert.strictEqual(store.getItem(bid, 0).status, S.PENDING, '任务应退回待生成，自动继续');
+    }
+  }
+  assert.strictEqual(store.getBatch(bid).status, 'paused', '连续 3 次才暂停，且不是 error');
+  assert.strictEqual(store.getItem(bid, 0).status, S.NEEDS_REVIEW, '不能无限重发前提');
+  assert.ok(store.getLogs().some((l) => /前提诊断/.test(l.message)), '页面诊断应写进后台日志');
+  assert.ok(store.getLogs().some((l) => /自动重试/.test(l.message)), '应写明自动重试');
+  console.log('PASS H: 前提失败自动恢复 2 次，超限才暂停（不是异常中断）');
+
+  /* I：暂停后点「继续」能直接恢复，且清掉连续失败计数 */
+  await store.withLock(async () => {
+    const it = store.getItem(bid, 0);
+    it.status = S.PENDING;
+    await store.putItem(bid, it);
+  });
+  const resumed = await orch.resume(bid);
+  assert.strictEqual(resumed.ok, true);
+  assert.strictEqual(store.getBatch(bid).status, 'running');
+  assert.strictEqual(store.getBatch(bid).premiseFailStreak, 0, '继续时应清空连续失败计数');
+  console.log('PASS I: 点「继续」即可恢复，无需重建批次');
+
+  /* J：正式提示词连续发送失败也只暂停，不留下「批次处于异常状态」 */
+  bid = await setup();
+  for (let i = 0; i < 2; i++) {
+    token = await claim(bid);
+    await outcome(token, 'SEND_FAILED', { code: 'submit-failed', diagnostic: ['第1次：提交未生效（submit-failed）'] });
+  }
+  assert.notStrictEqual(store.getBatch(bid).status, 'error', '不应再出现 error 状态');
+  assert.strictEqual(store.getBatch(bid).status, 'paused');
+  assert.ok(store.getLogs().some((l) => /发送诊断/.test(l.message)), '发送诊断应写进后台日志');
+  console.log('PASS J: 连续发送失败改为暂停并附诊断，不再置异常中断');
+
   global.setInterval = realSetInterval;
   console.log('\nALL PASS — 结果处理与重试护栏回归通过');
 })().catch((e) => {
