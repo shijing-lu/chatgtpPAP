@@ -568,27 +568,37 @@
       let bid = ((rt.activeTabs || {})[tabId] || {}).batchId;
 
       // 兜底：扩展重载 / runtime 归属丢失后，别让这个标签页干等 30 秒的定时自愈。
-      // 只在「恰好一个批次在跑、有待办、且它目前没有任何绑定标签页」时就地补绑定，
-      // 避免多个标签页被同时拉进同一批次抢任务。
+      // 只在「恰好一个批次在跑、有待办，且原有绑定都不活跃」时就地补绑定，
+      // 避免用户随手多开的 ChatGPT 标签页一起抢同一批任务。
       if (!bid || !store.getBatch(bid)) {
         const running = store.listBatches().filter(
           (x) => x.status === G.RUNNING && store.getItems(x.id).some((it) => it.status === S.PENDING)
         );
         if (running.length === 1) {
           const target = running[0];
-          const alreadyBound = Object.entries(rt.activeTabs || {}).some(([, v]) => v && v.batchId === target.id);
-          if (!alreadyBound) {
+          const bound = Object.entries(rt.activeTabs || {}).filter(([, v]) => v && v.batchId === target.id);
+          const live = bound.filter(([, v]) => !v.stale);
+          if (!live.length) {
             const activeTabs = Object.assign({}, rt.activeTabs);
+            // 清掉失效归属，避免它继续占着位置让后台误以为还有执行器
+            for (const [tid] of bound) delete activeTabs[tid];
             activeTabs[tabId] = Object.assign({}, activeTabs[tabId], {
               batchId: target.id, state: 'idle', stale: false, at: Date.now()
             });
             await store.setRuntime({ activeTabs });
             bid = target.id;
-            store.addLog('info', `标签页 ${tabId} 未登记，已自动归到${batchLabel(target)}继续执行`);
+            store.addLog('info', `标签页 ${tabId} 未登记（原有绑定已失联），已自动归到${batchLabel(target)}继续执行`);
           }
         }
       }
-      if (!bid) return { ok: false, reason: 'no-batch' };
+      if (!bid) {
+        const runningBatches = store.listBatches().filter((x) => x.status === G.RUNNING);
+        return {
+          ok: false,
+          reason: 'no-batch',
+          activeBatch: runningBatches.length === 1 ? runningBatches[0].name : ''
+        };
+      }
 
       const b = store.getBatch(bid);
       if (!b) return { ok: false, reason: 'no-batch' };
@@ -697,12 +707,33 @@
     if (!d || typeof d !== 'object') return;
     store.addLog(
       'warn',
-      `#${item.index + 1} ${code} 诊断：img=${d.totalImgs} 新增=${d.freshImgs} 大图=${d.largeFresh} 规则命中=${d.strictHits} canvas=${d.canvases} 消息=${d.msgNodes} 停止按钮=${d.stopHit ? 'Y' : 'N'}`,
+      `#${item.index + 1} ${code} 诊断：img=${d.totalImgs || 0} 新增=${d.freshImgs || 0} 大图=${d.largeFresh || 0} 规则命中=${d.strictHits || 0} 链接=${d.freshLinks || 0} 附件=${d.fileCards || 0} 产物=${d.artifactHits || 0} canvas=${d.canvases || 0} 消息=${d.msgNodes || 0} 停止按钮=${d.stopHit ? 'Y' : 'N'}`,
       { index: item.index }
     );
     for (const s of d.samples || []) {
       store.addLog('warn', `#${item.index + 1}   ↳ ${s}`, { index: item.index });
     }
+  }
+
+  /** 产物优先级：已知内嵌图 > 高清原图链接 > 宽松内嵌图 > 文件附件卡片。
+   * 「页面里没有 <img>，只有 xxx.png 附件卡片」的场景必须能选出产物。 */
+  function pickArtifact(list) {
+    let best = null;
+    let rank = -1;
+    for (const a of list) {
+      if (!a || !a.src) continue;
+      const k = a.kind || 'img';
+      let r;
+      if (k === 'img') r = (a.known ? 100 : 80) + Math.min(9, ((a.w || 0) * (a.h || 0)) / 1e7);
+      else if (k === 'link') r = (/原图|高清|full|original|4k/i.test(a.label || '') ? 95 : 55) + (a.score || 0);
+      else if (k === 'card') r = 40 + (a.score || 0);
+      else r = 20;
+      if (r > rank) {
+        rank = r;
+        best = a;
+      }
+    }
+    return best;
   }
 
   async function handleLimit(item, raw) {
@@ -812,17 +843,32 @@
       }
 
       if (status === 'IMAGE_READY') {
-        const imgs = Array.isArray(data.images) ? data.images : [];
-        const best = imgs.slice().sort((a, b) => (b.w || 0) * (b.h || 0) - (a.w || 0) * (a.h || 0))[0];
+        const arts = Array.isArray(data.images) ? data.images : [];
+        const best = pickArtifact(arts);
         if (!best || !best.src) return handleRetryable(item, 'NO_IMAGE', cfg);
 
+        const shape = best.kind || 'img';
+        const label = best.label ? `「${String(best.label).slice(0, 40)}」` : '';
         store.addLog(
           'info',
-          `#${item.index + 1} 已确认出图：${imgs.length} 张，取最大 ${best.w || '?'}×${best.h || '?'}${data.loose ? '（宽松规则命中，URL 规则可能已改版）' : ''}，开始下载`,
+          `#${item.index + 1} 已确认出图：${arts.length} 个产物，采用 ${shape} ${label}${best.w ? ` ${best.w}×${best.h}` : ''}${data.loose ? '（含宽松规则命中）' : ''}，开始下载`,
           { index: item.index }
         );
-        const kind = best.src.startsWith('blob:') ? 'blob' : best.src.startsWith('data:') ? 'data' : 'https';
-        item.image = { src: best.src, w: best.w || 0, h: best.h || 0, kind };
+
+        const src = best.src;
+        const isBlob = /^blob:/i.test(src);
+        const isData = /^data:/i.test(src);
+        const isFile = !/^https?:\/\//i.test(src) && !isBlob && !isData;
+        const kind = isBlob ? 'blob' : isData ? 'data' : isFile ? 'file' : 'https';
+        item.image = {
+          src,
+          w: best.w || 0,
+          h: best.h || 0,
+          kind,
+          artifactKind: shape,
+          label: best.label || '',
+          click: !!best.click
+        };
         item.ts = Object.assign({}, item.ts, { imageAt: Date.now() });
         sendFailStreak = 0;
         const okBatch = store.getBatch(bid);
@@ -831,16 +877,21 @@
           await store.putBatch(okBatch);
         }
 
-        if (kind === 'blob') {
+        if (isBlob) {
           await finalize(item, S.DOWNLOADING);
           item.tabId = senderTabId;
           await store.putItem(bid, item);
           await dl.requestFallback(item, 'blob-url');
-        } else if (kind === 'data') {
-          const mime = (best.src.match(/^data:([^;,]+)/i) || [])[1] || 'image/png';
-          await dl.startDataDownload(item, best.src, CGR.extFromUrl('', mime));
+        } else if (isData) {
+          const mime = (src.match(/^data:([^;,]+)/i) || [])[1] || 'image/png';
+          await dl.startDataDownload(item, src, CGR.extFromUrl('', mime));
+        } else if (isFile) {
+          // sandbox: / 文件附件卡片：下载 API 用不了，走页面内取流 → 点击附件 → 归位到批次目录
+          item.tabId = senderTabId;
+          await store.putItem(bid, item);
+          await dl.startFileDownload(item, best, senderTabId);
         } else {
-          await dl.startUrlDownload(item, best.src, CGR.extFromUrl(best.src));
+          await dl.startUrlDownload(item, src, CGR.extFromUrl(src));
         }
         return { ok: true };
       }
@@ -850,7 +901,13 @@
         const d = data.diagnostic || {};
         store.addLog('warn', `#${item.index + 1} 未检测到图片（可能被拒答、只返回文字，或图片晚于判定出现）`);
         return handleRetryable(item, 'NO_IMAGE', cfg, {
-          imagePresent: (d.largeFresh || 0) > 0 || (d.freshImgs > 0 && d.strictHits > 0)
+          // 页面上出现过新链接/附件卡片也算「已有产物」：宁可标待确认，也绝不重发提示词
+          imagePresent:
+            (d.largeFresh || 0) > 0 ||
+            (d.freshImgs > 0 && d.strictHits > 0) ||
+            (d.artifactHits || 0) > 0 ||
+            (d.freshLinks || 0) > 0 ||
+            (d.fileCards || 0) > 0
         });
       }
 
@@ -863,7 +920,10 @@
           store.addLog('warn', `#${item.index + 1} 超时且仍在生成，标记为待确认`);
         } else {
           await handleRetryable(item, 'TIMEOUT', cfg, {
-            imagePresent: (d.largeFresh || 0) > 0 || (data.imageHint || 0) > 0
+            imagePresent:
+              (d.largeFresh || 0) > 0 ||
+              (data.imageHint || 0) > 0 ||
+              (d.artifactHits || 0) > 0
           });
         }
         return { ok: true };

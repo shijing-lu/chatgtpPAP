@@ -51,6 +51,12 @@ const wakeRebindAt = new Map();
  */
 async function wakeTick() {
   await store.ensureLoaded();
+  // 附件点击后若一直没产生下载，别让任务永远挂在「下载中」
+  try {
+    await store.withLock(() => dl.checkPendingClicks());
+  } catch (e) {
+    /* ignore */
+  }
   const rt = store.getRuntime();
   for (const b of store.listBatches()) {
     if (b.status !== G.RUNNING) continue;
@@ -383,6 +389,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 /* ---------------- 浏览器事件 ---------------- */
+
+/* 页面点击附件卡片产生的下载不属于扩展，必须在这里改文件名并登记归属，
+ * 否则文件会落到 Chrome 默认下载目录、任务也永远停在「下载中」。
+ * 这个监听器必须在 service worker 顶层同步注册，且同步调用 suggest()。 */
+if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
+  chrome.downloads.onDeterminingFilename.addListener((d, suggest) => {
+    try {
+      dl.onDeterminingFilename(d, suggest);
+    } catch (e) {
+      try {
+        suggest();
+      } catch (e2) {
+        /* ignore */
+      }
+    }
+  });
+}
 
 chrome.downloads.onChanged.addListener((delta) => {
   store

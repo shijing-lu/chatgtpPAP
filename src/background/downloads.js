@@ -8,6 +8,10 @@
 
   const dlIndex = new Map(); // downloadId -> index
   const chunkBuf = new Map(); // index -> { parts:[], total:0 }
+  // 「点击附件卡片让 ChatGPT 自己下载」时，页面触发的下载不属于扩展，
+  // 需要在 onDeterminingFilename 里改文件名并登记归属，否则文件会落到默认下载目录。
+  const PENDING_KEY = 'dl:pending-click';
+  let pendingClick = null;
 
   function buildPath(item, ext) {
     const cfg = store.getCfg();
@@ -26,6 +30,114 @@
   function assignFilename(item, ext) {
     if (!item.filename) item.filename = buildPath(item, ext);
     return item.filename;
+  }
+
+  /** 附件的扩展名优先取卡片上的文件名（static_linked_list_4k.png），URL 没扩展名时也能对 */
+  function artifactExt(art) {
+    const m = String((art && art.label) || '').match(/\.(png|jpe?g|webp|gif|avif)(?:[?#\s]|$)/i);
+    if (m) return m[1].toLowerCase() === 'jpeg' ? 'jpg' : m[1].toLowerCase();
+    return CGR.extFromUrl((art && (art.src || art.raw)) || '');
+  }
+
+  /** 预备接管「页面点击产生的下载」。filename 按批次目录/命名模板算好。 */
+  async function armClick(item, ext, art) {
+    const filename = assignFilename(item, ext);
+    pendingClick = {
+      batchId: item.batchId,
+      index: item.index,
+      filename,
+      label: (art && art.label) || '',
+      src: (art && art.src) || (item.image && item.image.src) || '',
+      expiresAt: Date.now() + 45000
+    };
+    try {
+      await chrome.storage.local.set({ [PENDING_KEY]: pendingClick });
+    } catch (e) {
+      /* storage 不可用时内存表仍然有效 */
+    }
+    item.status = CGR.STATUS.DOWNLOADING;
+    item.lease = null;
+    await store.putItem(item.batchId, item);
+    store.addLog('info', `#${item.index + 1} 文件附件产物，已准备下载并归位到 ${filename}`, { index: item.index });
+    return pendingClick;
+  }
+
+  /** 由 service-worker 顶层同步注册。扩展自己发起的下载不干预。 */
+  function onDeterminingFilename(d, suggest) {
+    const p = pendingClick;
+    if (!p || Date.now() > p.expiresAt || (d && d.byExtensionId)) {
+      try {
+        suggest();
+      } catch (e) {
+        /* ignore */
+      }
+      return;
+    }
+    try {
+      suggest({ filename: p.filename, conflictAction: 'uniquify' });
+    } catch (e) {
+      return;
+    }
+    pendingClick = null;
+    const rec = { index: p.index, batchId: p.batchId };
+    // suggest 已经调用过了，这里的任何副作用都不能把异常抛回监听器，
+    // 否则 service-worker 的兜底会再调一次 suggest()。
+    try {
+      dlIndex.set(d.id, rec);
+      store.addLog('info', `#${p.index + 1} 页面附件下载已归位 → ${p.filename}`, { index: p.index });
+      chrome.storage.local.remove(PENDING_KEY);
+      chrome.storage.local.set({ [`dl:${d.id}`]: rec });
+    } catch (e) {
+      /* ignore */
+    }
+  }
+
+  /** 点击后没产生下载时别把任务永远挂在「下载中」。由后台周期检查调用。 */
+  async function checkPendingClicks() {
+    let p = pendingClick;
+    if (!p) {
+      try {
+        const rec = await chrome.storage.local.get(PENDING_KEY);
+        p = rec[PENDING_KEY];
+      } catch (e) {
+        return;
+      }
+    }
+    if (!p || Date.now() <= p.expiresAt) return;
+    pendingClick = null;
+    try {
+      await chrome.storage.local.remove(PENDING_KEY);
+    } catch (e) {
+      /* ignore */
+    }
+    const item = store.getItem(p.batchId, p.index);
+    if (item && item.status === CGR.STATUS.DOWNLOADING) {
+      item.status = CGR.STATUS.NEEDS_REVIEW;
+      item.error = { code: 'ATTACHMENT_CLICK_TIMEOUT', message: '页面上已有图片文件，但点击附件后没有产生下载；请手动保存或检查下载权限' };
+      await store.putItem(p.batchId, item);
+      store.addLog('error', `#${p.index + 1} 附件点击未产生下载，已标记待确认（不重发提示词）`, { index: p.index });
+    }
+  }
+
+  /**
+   * 文件类产物的下载入口：
+   *  - http(s) 直链 → A（chrome.downloads），失败自动降级 B
+   *  - sandbox: / 卡片 / 需要点击 → 页面内取流，取流失败再模拟点击附件，
+   *    由 onDeterminingFilename 把页面下载改到批次目录。
+   */
+  async function startFileDownload(item, art, tabId) {
+    const ext = artifactExt(art);
+    const src = (art && art.src) || '';
+    if (/^https?:\/\//i.test(src) && !art.click) {
+      await startUrlDownload(item, src, ext);
+      return item;
+    }
+    await armClick(item, ext, art);
+    if (tabId != null) item.tabId = tabId;
+    item.download = Object.assign({}, item.download, { tier: 'C', state: 'pending', filename: item.filename });
+    await store.putItem(item.batchId, item);
+    await requestFallback(item, 'file-artifact', { label: art.label, click: true });
+    return item;
   }
 
   async function startUrlDownload(item, url, ext) {
@@ -94,12 +206,18 @@
     return item;
   }
 
-  /** 让内容脚本在页面内取流（blob: 或直链 401 时） */
-  async function requestFallback(item, reason) {
+  /** 让内容脚本在页面内取流（blob: / sandbox: / 直链 401 / 附件卡片） */
+  async function requestFallback(item, reason, opts) {
+    const detail = opts || {};
+    const img = item.image || {};
     const tabId = item.tabId || (item.lease && item.lease.tabId);
+    const needClick = !!(detail.click || img.click || img.artifactKind === 'card');
+    if (needClick && !pendingClick) {
+      await armClick(item, artifactExt({ src: img.src, label: detail.label || img.label }), img);
+    }
     item.download = Object.assign({}, item.download, { tier: 'B', state: 'fetching' });
     await store.putItem(item.batchId, item);
-    store.addLog('warn', `#${item.index + 1} 转用页面内取流（${reason}）`);
+    store.addLog('warn', `#${item.index + 1} 转用页面内取流（${reason}）${needClick ? '，取流失败将点击附件下载' : ''}`);
     if (!tabId) {
       item.status = CGR.STATUS.NEEDS_REVIEW;
       item.error = { code: 'NO_TAB_FOR_FALLBACK', message: '图片已生成但无法找到取流标签页' };
@@ -107,7 +225,15 @@
       return;
     }
     try {
-      await chrome.tabs.sendMessage(tabId, { type: 'FETCH_IMAGE', index: item.index, batchId: item.batchId, src: item.image && item.image.src });
+      await chrome.tabs.sendMessage(tabId, {
+        type: 'FETCH_IMAGE',
+        index: item.index,
+        batchId: item.batchId,
+        src: img.src,
+        label: detail.label || img.label || '',
+        kind: img.artifactKind || 'img',
+        click: needClick
+      });
     } catch (e) {
       item.status = CGR.STATUS.NEEDS_REVIEW;
       item.error = { code: 'FALLBACK_UNREACHABLE', message: '取流标签页已失联，图片未保存' };
@@ -208,12 +334,16 @@
     buildPath,
     startUrlDownload,
     startDataDownload,
+    startFileDownload,
     requestFallback,
+    onDeterminingFilename,
+    checkPendingClicks,
     pushChunk,
     commitChunks,
     handleChanged,
     clearCache() {
       dlIndex.clear();
+      pendingClick = null;
     }
   };
 })(typeof globalThis !== 'undefined' ? globalThis : self);
