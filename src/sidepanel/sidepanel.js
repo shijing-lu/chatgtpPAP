@@ -832,7 +832,7 @@
     const note = $('premiseNote');
     if (c && c.premiseEnabled !== false && (c.premises || []).length) {
       note.style.display = 'block';
-      note.textContent = `「${c.name}」已启用 ${c.premises.length} 条前提：每条新对话先发完就走（不等回复），再开始生图`;
+      note.textContent = `「${c.name}」已启用 ${c.premises.length} 条前提：逐条发出并留接收间隔（不等回复），最后一条就绪后才开始生图`;
     } else {
       note.style.display = 'none';
     }
@@ -914,6 +914,8 @@
     $('template').value = cfg.template || '{index:03}_{slug}';
     $('minDelayMs').value = Math.round((cfg.minDelayMs || 3000) / 1000);
     $('maxDelayMs').value = Math.round((cfg.maxDelayMs || 7000) / 1000);
+    $('premiseGapMs').value = Math.round((cfg.premiseGapMs || 4000) / 1000);
+    $('premiseAckMs').value = Math.round((cfg.premiseAckMs || 8000) / 1000);
     $('timeoutMs').value = Math.round((cfg.timeoutMs || 300000) / 1000);
     $('maxAttempts').value = cfg.maxAttempts == null ? 2 : cfg.maxAttempts;
     $('onNoImage').value = cfg.onNoImage || 'review';
@@ -938,6 +940,8 @@
       template: $('template').value.trim() || '{index:03}_{slug}',
       minDelayMs: minSec * 1000,
       maxDelayMs: maxSec * 1000,
+      premiseGapMs: Math.max(2, Math.min(30, Number($('premiseGapMs').value) || 4)) * 1000,
+      premiseAckMs: Math.max(1, Math.min(30, Number($('premiseAckMs').value) || 8)) * 1000,
       timeoutMs: Math.max(60, Number($('timeoutMs').value) || 300) * 1000,
       maxAttempts: Math.max(0, Math.min(5, Number($('maxAttempts').value) || 0)),
       onNoImage: $('onNoImage').value,
@@ -1224,7 +1228,7 @@
     });
 
     // 设置
-    ['mode', 'concurrency', 'folder', 'template', 'minDelayMs', 'maxDelayMs', 'timeoutMs', 'maxAttempts', 'onNoImage', 'limitCooldownMin'].forEach((id) => {
+    ['mode', 'concurrency', 'folder', 'template', 'minDelayMs', 'maxDelayMs', 'premiseGapMs', 'premiseAckMs', 'timeoutMs', 'maxAttempts', 'onNoImage', 'limitCooldownMin'].forEach((id) => {
       const el = $(id);
       if (!el) return;
       el.addEventListener('input', () => {

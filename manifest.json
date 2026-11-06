@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT 批量生图助手",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "description": "把一批提示词交给 ChatGPT 官网逐条生图，自动检测完成并下载到指定文件夹。",
   "minimum_chrome_version": "114",
   "permissions": ["storage", "unlimitedStorage", "downloads", "tabs", "alarms", "sidePanel", "scripting"],
@@ -41,6 +41,7 @@
         "src/shared/sched.js",
         "src/content/probes.js",
         "src/content/composer.js",
+        "src/content/premise.js",
         "src/content/watcher.js",
         "src/content/selfcheck.js",
         "src/content/content.js"
