@@ -92,7 +92,16 @@
 
   /* ---------------- 前提设定 ---------------- */
 
-  /** 逐条发送前提，发出去就算完成：不等回复、不取图、不计入队列。 */
+  /** 把发送链路的逐次页面实况写进日志，失败时能直接看出卡在哪一步 */
+  function logSendDiagnostic(prefix, sent) {
+    for (const line of (sent && sent.diagnostic) || []) {
+      send({ type: MSG.LOG, level: 'warn', message: `${prefix} ${line}` });
+    }
+  }
+
+  /** 逐条发送前提，发出去就算完成：不等回复、不取图、不计入队列。
+   * 关键点：ChatGPT 输出回复时发送按钮会变成「停止生成」，所以每条前提发送前
+   * 都要把输入框恢复到可发送状态；前提阶段直接跳过文本回复，不做任何等待。 */
   async function applyPremises(list, cfg, leaseToken, isAborted) {
     for (let i = 0; i < list.length; i++) {
       if (isAborted()) return { ok: false, reason: 'aborted' };
@@ -100,22 +109,21 @@
       send({ type: MSG.LOG, level: 'info', message: `发送前提 ${i + 1}/${list.length}…` });
       await send({ type: MSG.PROGRESS, leaseToken, phase: 'sending' });
 
-      const sent = await composer.sendPrompt(list[i], cfg);
-      if (!sent.ok) return { ok: false, reason: `send-failed(${sent.code})` };
+      const sent = await composer.sendPrompt(list[i], cfg, { allowStop: true });
+      if (!sent.ok) {
+        logSendDiagnostic(`前提 ${i + 1}`, sent);
+        return { ok: false, reason: `send-failed(${sent.code})`, diagnostic: sent.diagnostic };
+      }
 
       // 前提只是把上下文塞进对话，发出去就算完成，不等任何回复、也不看图
-      send({ type: MSG.LOG, level: 'info', message: `前提 ${i + 1} 已发送（不等回复）` });
+      send({ type: MSG.LOG, level: 'info', message: `前提 ${i + 1} 已发送（${sent.method || 'auto'}，不等回复）` });
       if (i < list.length - 1) await CGR.sleep(1200);
     }
 
-    // 仅当模型还在输出时短暂让一让输入框，避免下一条抢不到发送按钮；最多 15 秒，绝不看内容
+    // 最后一条前提之后模型多半还在输出文字。这里只腾出输入框，不读回复、不看图、不等生成结束。
     if (probe.isGenerating()) {
-      const t0 = Date.now();
-      await CGR.pollUntil(() => !probe.isGenerating(), 15000, 400);
-      const waited = Date.now() - t0;
-      if (waited > 1500) {
-        send({ type: MSG.LOG, level: 'info', message: `等输入框空闲 ${Math.round(waited / 1000)} 秒后继续` });
-      }
+      const r = await composer.waitSendable({ allowStop: true, naturalWaitMs: 800, maxWaitMs: 3000 });
+      if (r.stopped) send({ type: MSG.LOG, level: 'info', message: '已跳过前提的文本回复，输入框恢复可用' });
     }
 
     await CGR.sleep(600);
@@ -179,7 +187,7 @@
           } else if (pr.reason === 'aborted') {
             await report(leaseToken, 'ABORTED');
           } else {
-            await report(leaseToken, 'PREMISE_FAILED', { reason: pr.reason });
+            await report(leaseToken, 'PREMISE_FAILED', { reason: pr.reason, diagnostic: pr.diagnostic || [] });
           }
           return;
         }
@@ -210,7 +218,8 @@
 
       const sent = await composer.sendPrompt(item.prompt, cfg);
       if (!sent.ok) {
-        await report(leaseToken, 'SEND_FAILED', { code: sent.code });
+        logSendDiagnostic(`#${item.index + 1}`, sent);
+        await report(leaseToken, 'SEND_FAILED', { code: sent.code, diagnostic: sent.diagnostic || [] });
         return;
       }
 

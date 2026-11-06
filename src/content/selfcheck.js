@@ -60,15 +60,30 @@
     }
     out.push(item('insert', '输入链路可用', insertOk, insertDetail, '若失败但提示词能正常输入，可忽略；若发送后输入框为空，说明需要更新插入逻辑'));
 
+    const btnInfo = root.CGR_COMPOSER ? root.CGR_COMPOSER.findSendButton() : null;
+    const sendSt = root.CGR_COMPOSER ? root.CGR_COMPOSER.stateText(root.CGR_COMPOSER.sendState()) : '';
     out.push(
       item(
         'send',
-        '发送按钮存在',
+        '发送按钮选择器',
         !!sendBtn,
-        sendBtn ? `aria-label=${sendBtn.getAttribute('aria-label') || '无'} / disabled=${!!sendBtn.disabled}` : '找不到发送按钮',
-        '找不到按钮时会回退用 Enter 发送，一般仍可用'
+        sendBtn
+          ? `命中：aria-label=${sendBtn.getAttribute('aria-label') || '无'} / disabled=${!!sendBtn.disabled}｜${sendSt}`
+          : `找不到发送按钮｜${sendSt}`,
+        '输入文字后仍显示「可用发送按钮=无」说明选择器需要更新；「停止按钮已排除」大于 0 表示当前正在生成，插件会先恢复可发送状态'
       )
     );
+    if (btnInfo && btnInfo.excludedStop) {
+      out.push(
+        item(
+          'stopExcluded',
+          '停止按钮隔离',
+          true,
+          `已从发送按钮候选里排除 ${btnInfo.excludedStop} 个「停止生成」按钮，不会误点导致消息发不出去`,
+          ''
+        )
+      );
+    }
 
     out.push(item('main', '对话容器 main', !!main, main ? '已找到' : '未找到', '对话容器缺失会导致无法检测出图'));
 
