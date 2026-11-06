@@ -75,9 +75,19 @@
     heartbeatTimer = 0;
   }
 
+  /** 结果上报必须确认送达：丢一条 OUTCOME，后台就会在租约过期后把任务退回队列，
+   * 重新发一次提示词、重新生成一张图。SW 冷启动/回收时的丢包是常态。 */
   async function report(leaseToken, status, data) {
-    const res = await send({ type: MSG.OUTCOME, leaseToken, status, data: data || {} });
-    return res;
+    const msg = { type: MSG.OUTCOME, leaseToken, status, data: data || {} };
+    for (let i = 0; i < 4; i++) {
+      const res = await send(msg);
+      if (res && res.ok !== false) return res;
+      if (contextDead) return null;
+      await CGR.sleep(600 * (i + 1));
+    }
+    const idx = current && current.index != null ? current.index + 1 : '?';
+    send({ type: MSG.LOG, level: 'error', message: `#${idx} 结果上报失败（${status}），请检查后台日志` });
+    return null;
   }
 
   /* ---------------- 前提设定 ---------------- */
@@ -220,12 +230,35 @@
       const res = await watch.waitForOutcome(before, cfg, isAborted);
       clearInterval(waitingTimer);
       waitingTimer = 0;
+
+      if (res.status === 'IMAGE_READY') {
+        const n = (res.images || []).length;
+        send({
+          type: MSG.LOG,
+          level: 'info',
+          message: `#${item.index + 1} 检测到 ${n} 张图${res.loose ? '（宽松规则命中：图片 URL 规则可能已改版）' : ''}，交给后台下载`
+        });
+      } else if (res.diagnostic) {
+        const d = res.diagnostic;
+        send({
+          type: MSG.LOG,
+          level: 'warn',
+          message: `#${item.index + 1} ${res.status} 页面实况：img ${d.totalImgs} / 新增 ${d.freshImgs} / 规则命中 ${d.strictHits} / canvas ${d.canvases} / 消息 ${d.msgNodes} / 停止按钮 ${d.stopHit ? '命中' : '未命中'}`
+        });
+        for (const s of d.samples || []) {
+          send({ type: MSG.LOG, level: 'warn', message: `  ↳ ${s}` });
+        }
+      }
+
       await report(leaseToken, res.status, {
         images: res.images,
         text: res.text,
         raw: res.raw,
         stillGenerating: res.stillGenerating,
-        phase: res.phase
+        phase: res.phase,
+        loose: res.loose,
+        sigChanges: res.sigChanges,
+        diagnostic: res.diagnostic
       });
     } catch (e) {
       send({ type: MSG.LOG, level: 'error', message: `执行异常：${String((e && e.message) || e)}` });

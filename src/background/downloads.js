@@ -55,6 +55,7 @@
     dlIndex.set(dlId, { index: item.index, batchId: item.batchId });
     await chrome.storage.local.set({ [`dl:${dlId}`]: { index: item.index, batchId: item.batchId } });
     item.download.id = dlId;
+    store.addLog('info', `#${item.index + 1} 已发起下载（直链 A，id=${dlId}）→ ${filename}`, { index: item.index });
     await store.putItem(item.batchId, item);
     return item;
   }
@@ -88,6 +89,7 @@
     dlIndex.set(dlId, { index: item.index, batchId: item.batchId });
     await chrome.storage.local.set({ [`dl:${dlId}`]: { index: item.index, batchId: item.batchId } });
     item.download.id = dlId;
+    store.addLog('info', `#${item.index + 1} 已发起下载（数据 B，id=${dlId}）→ ${filename}`, { index: item.index });
     await store.putItem(item.batchId, item);
     return item;
   }
@@ -109,6 +111,7 @@
     } catch (e) {
       item.status = CGR.STATUS.NEEDS_REVIEW;
       item.error = { code: 'FALLBACK_UNREACHABLE', message: '取流标签页已失联，图片未保存' };
+      store.addLog('error', `#${item.index + 1} 图片已生成但取流失败：${String((e && e.message) || e)}`, { index: item.index });
       await store.putItem(item.batchId, item);
     }
   }

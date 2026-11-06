@@ -537,6 +537,29 @@
     await store.putBatch(b);
   }
 
+  /** 上报重试时租约可能已被清掉，用 token 反查，避免前端无限重发 */
+  function findByOutcomeToken(token) {
+    if (!token) return null;
+    for (const b of store.listBatches()) {
+      for (const it of store.getItems(b.id)) {
+        if (it.lastOutcomeToken === token) return it;
+      }
+    }
+    return null;
+  }
+
+  function logDiagnostic(item, d, code) {
+    if (!d || typeof d !== 'object') return;
+    store.addLog(
+      'warn',
+      `#${item.index + 1} ${code} 诊断：img=${d.totalImgs} 新增=${d.freshImgs} 大图=${d.largeFresh} 规则命中=${d.strictHits} canvas=${d.canvases} 消息=${d.msgNodes} 停止按钮=${d.stopHit ? 'Y' : 'N'}`,
+      { index: item.index }
+    );
+    for (const s of d.samples || []) {
+      store.addLog('warn', `#${item.index + 1}   ↳ ${s}`, { index: item.index });
+    }
+  }
+
   async function handleLimit(item, raw) {
     const b = store.getBatch(item.batchId);
     const cfg = store.getCfg();
@@ -554,9 +577,34 @@
     return item;
   }
 
-  async function handleRetryable(item, code, cfg) {
+  async function handleRetryable(item, code, cfg, opts) {
+    const detail = opts || {};
     item.attempt = (item.attempt || 0) + 1;
     const max = item.maxAttempts || cfg.maxAttempts || 2;
+
+    // 网页上已经出现新的大图，说明图其实生成了，只是没走完下载。
+    // 此时重发提示词 = 再消耗一次生图额度、再多出一张图，必须停下来。
+    if (detail.imagePresent) {
+      await finalize(item, S.NEEDS_REVIEW, {
+        error: { code: 'IMAGE_PRESENT_NOT_SAVED', message: '网页已出图但未保存，已停止自动重试以免重复生图' }
+      });
+      await bumpStat(item.batchId, 'needsReview');
+      store.addLog('error', `#${item.index + 1} 网页已有新图却判 ${code}；已停止重发，请在侧边栏「待确认」里处理`);
+      return { ok: true };
+    }
+
+    // 默认策略：不自动重发提示词。自动重试只适合「确认没出图」的场景，
+    // 一旦误判就会把同一条提示词反复生成，代价是不可逆的额度消耗。
+    const policy = cfg.onNoImage || 'review';
+    const isImageMiss = code === 'NO_IMAGE' || code === 'TIMEOUT' || code === 'PAGE_ERROR';
+    if (isImageMiss && policy === 'review') {
+      await finalize(item, S.NEEDS_REVIEW, {
+        error: { code, message: '未确认出图，已停止自动重试（避免重复生图）' }
+      });
+      await bumpStat(item.batchId, 'needsReview');
+      store.addLog('warn', `#${item.index + 1} ${code}：已标记待确认，不会重发提示词；确认确实没出图后可在列表点「重试」`);
+      return { ok: true };
+    }
 
     if (code === 'NO_IMAGE' && cfg.onNoImage === 'skip') {
       await finalize(item, S.SKIPPED, { error: { code, message: '未出图，按设置跳过' } });
@@ -584,7 +632,14 @@
       await store.ensureLoaded();
       const token = msg.leaseToken;
       const item = token ? lease.findByToken(token) : null;
-      if (!item) return { ok: false, error: 'lease-not-found' };
+      if (!item) {
+        // 前端重试上报时，后台可能已处理完并清掉租约。必须回 ok，
+        // 否则前端会一直重发到日志刷屏（也更不能重复触发下载）。
+        return findByOutcomeToken(token) ? { ok: true, duplicate: true } : { ok: false, error: 'lease-not-found' };
+      }
+      if (item.lastOutcomeToken === token) return { ok: true, duplicate: true };
+      item.lastOutcomeToken = token;
+      await store.putItem(item.batchId, item);
 
       const bid = item.batchId;
       const cfg = store.getCfg();
@@ -613,15 +668,24 @@
         const best = imgs.slice().sort((a, b) => (b.w || 0) * (b.h || 0) - (a.w || 0) * (a.h || 0))[0];
         if (!best || !best.src) return handleRetryable(item, 'NO_IMAGE', cfg);
 
-        item.image = { src: best.src, w: best.w || 0, h: best.h || 0, kind: best.src.startsWith('blob:') ? 'blob' : 'https' };
+        store.addLog(
+          'info',
+          `#${item.index + 1} 已确认出图：${imgs.length} 张，取最大 ${best.w || '?'}×${best.h || '?'}${data.loose ? '（宽松规则命中，URL 规则可能已改版）' : ''}，开始下载`,
+          { index: item.index }
+        );
+        const kind = best.src.startsWith('blob:') ? 'blob' : best.src.startsWith('data:') ? 'data' : 'https';
+        item.image = { src: best.src, w: best.w || 0, h: best.h || 0, kind };
         item.ts = Object.assign({}, item.ts, { imageAt: Date.now() });
         sendFailStreak = 0;
 
-        if (item.image.kind === 'blob') {
+        if (kind === 'blob') {
           await finalize(item, S.DOWNLOADING);
           item.tabId = senderTabId;
           await store.putItem(bid, item);
           await dl.requestFallback(item, 'blob-url');
+        } else if (kind === 'data') {
+          const mime = (best.src.match(/^data:([^;,]+)/i) || [])[1] || 'image/png';
+          await dl.startDataDownload(item, best.src, CGR.extFromUrl('', mime));
         } else {
           await dl.startUrlDownload(item, best.src, CGR.extFromUrl(best.src));
         }
@@ -629,17 +693,25 @@
       }
 
       if (status === 'NO_IMAGE') {
-        store.addLog('warn', `#${item.index + 1} 未检测到图片（可能被拒答或只返回了文字）`);
-        return handleRetryable(item, 'NO_IMAGE', cfg);
+        logDiagnostic(item, data.diagnostic, 'NO_IMAGE');
+        const d = data.diagnostic || {};
+        store.addLog('warn', `#${item.index + 1} 未检测到图片（可能被拒答、只返回文字，或图片晚于判定出现）`);
+        return handleRetryable(item, 'NO_IMAGE', cfg, {
+          imagePresent: (d.largeFresh || 0) > 0 || (d.freshImgs > 0 && d.strictHits > 0)
+        });
       }
 
       if (status === 'TIMEOUT') {
+        logDiagnostic(item, data.diagnostic, 'TIMEOUT');
+        const d = data.diagnostic || {};
         if (data.stillGenerating) {
           await finalize(item, S.NEEDS_REVIEW, { error: { code: 'TIMEOUT_GENERATING', message: '超时但仍在生成，请人工确认' } });
           await bumpStat(bid, 'needsReview');
           store.addLog('warn', `#${item.index + 1} 超时且仍在生成，标记为待确认`);
         } else {
-          await handleRetryable(item, 'TIMEOUT', cfg);
+          await handleRetryable(item, 'TIMEOUT', cfg, {
+            imagePresent: (d.largeFresh || 0) > 0 || (data.imageHint || 0) > 0
+          });
         }
         return { ok: true };
       }
@@ -662,7 +734,17 @@
       }
 
       if (status === 'ABORTED' || status === 'NAVIGATED') {
-        await finalize(item, S.PENDING);
+        // 页面跳转/新开对话导致的退回也要计数，否则同样能无限重发提示词
+        item.attempt = (item.attempt || 0) + 1;
+        if (item.attempt >= (cfg.maxAttempts || 2)) {
+          await finalize(item, S.NEEDS_REVIEW, {
+            error: { code: status, message: '多次页面跳转，已停止自动重试以免重复生图' }
+          });
+          await bumpStat(bid, 'needsReview');
+          store.addLog('warn', `#${item.index + 1} 连续 ${item.attempt} 次页面跳转，已标记待确认`);
+        } else {
+          await finalize(item, S.PENDING);
+        }
         return { ok: true };
       }
 
@@ -683,10 +765,18 @@
       }
 
       if (status === 'CHAT_FAILED' || status === 'PAGE_ERROR') {
-        return handleRetryable(item, status, cfg);
+        logDiagnostic(item, data.diagnostic, status);
+        return handleRetryable(item, status, cfg, {
+          imagePresent: ((data.diagnostic || {}).largeFresh || 0) > 0
+        });
       }
 
-      await finalize(item, S.PENDING);
+      // 未知状态也不能悄悄把任务退回队列重跑
+      store.addLog('warn', `#${item.index + 1} 收到未知结果 ${status}，标记待确认`);
+      await finalize(item, S.NEEDS_REVIEW, {
+        error: { code: 'UNKNOWN_OUTCOME', message: `未识别的结果：${status}` }
+      });
+      await bumpStat(bid, 'needsReview');
       return { ok: true };
     });
   }

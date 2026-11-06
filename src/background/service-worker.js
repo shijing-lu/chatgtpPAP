@@ -386,7 +386,14 @@ chrome.downloads.onChanged.addListener((delta) => {
       await dl.handleChanged(delta);
       await store.publishView();
     })
-    .catch(() => {});
+    .catch((e) => {
+      // 以前这里静默吞异常：下载状态没被推进时用户完全看不出原因
+      try {
+        store.addLog('error', `下载状态事件处理失败（id=${delta && delta.id}）：${String((e && e.message) || e)}`);
+      } catch (e2) {
+        /* ignore */
+      }
+    });
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
