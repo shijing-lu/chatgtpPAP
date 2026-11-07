@@ -114,6 +114,109 @@ body {
   border-color: #f7cccc;
 }
 
+.hdr-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.hdr-ver {
+  font-family: inherit;
+  font-size: 11px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-soft);
+  color: var(--text-soft);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.hdr-ver:hover {
+  color: var(--primary);
+  border-color: var(--primary);
+}
+
+/* ---------- 设置页：版本与更新记录 ---------- */
+.ver-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ver-num {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  margin-top: 3px;
+  color: var(--text);
+}
+
+.ver-state {
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--ok-soft);
+  color: var(--ok);
+  white-space: nowrap;
+}
+
+.ver-state.warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.ver-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-soft);
+}
+
+.ver-note,
+.ver-history {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ver-note-title {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.ver-note ul {
+  margin: 0;
+  padding-left: 16px;
+  color: var(--text-soft);
+  line-height: 1.6;
+}
+
+.ver-h-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-soft);
+}
+
+.ver-h-row b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.ver-empty {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+
 /* ---------- tabs ---------- */
 .tabs {
   display: flex;

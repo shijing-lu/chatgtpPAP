@@ -903,6 +903,134 @@
     }
   }
 
+  /* ---------------- 版本与更新记录 ----------------
+   * 版本号只认 chrome.runtime.getManifest().version（= 当前真正跑着的代码），
+   * 所以扩展一旦重新加载，这里显示的数字必然跟着变；更新说明与历史来自 SW 记下的 cgrVersion。 */
+
+  let versionInfo = null;
+
+  function fmtTime(ts) {
+    if (!ts) return '—';
+    return new Date(ts).toLocaleString('zh-CN', {
+      hour12: false,
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  }
+
+  async function loadVersion() {
+    let meta = null;
+    try {
+      const data = await chrome.storage.local.get(CGR.VERSION.KEY);
+      meta = data[CGR.VERSION.KEY] || null;
+    } catch (e) {
+      /* storage 读不到也要显示版本号 */
+    }
+    versionInfo = CGR.VERSION.describe(CGR.VERSION.currentVersion(), meta);
+    renderVersion();
+  }
+
+  function renderVersion() {
+    const info = versionInfo;
+    if (!info) return;
+    const v = info.version || '?';
+
+    $('hdrVersion').textContent = 'v' + v;
+    $('hdrVersion').title = `当前运行版本 v${v}；点击查看版本与更新记录`;
+    $('verNumber').textContent = 'v' + v;
+
+    const state = $('verState');
+    state.textContent = info.note ? '已生效' : '缺少更新说明';
+    state.className = 'ver-state' + (info.note ? '' : ' warn');
+
+    const lines = $('verMeta');
+    lines.textContent = '';
+    const addLine = (text) => {
+      const d = document.createElement('div');
+      d.textContent = text;
+      lines.append(d);
+    };
+    if (info.previousVersion) {
+      addLine(`上次更新：v${info.previousVersion} → v${v}（${fmtTime(info.updatedAt)}）`);
+    } else {
+      addLine(info.updatedAt ? `首次记录版本：${fmtTime(info.updatedAt)}` : '还没有记录到版本变化，重载扩展后会自动记录');
+    }
+    addLine(`最近重载生效：${fmtTime(info.reloadedAt)}${info.reloadCount ? `（累计 ${info.reloadCount} 次）` : ''}`);
+    if (info.latestReleased && info.latestReleased !== v) {
+      addLine(`注意：更新说明里最新是 v${info.latestReleased}，与当前版本不一致`);
+    }
+
+    const note = $('verNote');
+    note.textContent = '';
+    if (info.note) {
+      const title = document.createElement('div');
+      title.className = 'ver-note-title';
+      title.textContent = `v${info.note.version} · ${info.note.title}（${info.note.date}）`;
+      const ul = document.createElement('ul');
+      for (const c of info.note.changes) {
+        const li = document.createElement('li');
+        li.textContent = c;
+        ul.append(li);
+      }
+      note.append(title, ul);
+    } else {
+      const d = document.createElement('div');
+      d.className = 'ver-empty';
+      d.textContent = `v${v} 还没有更新说明：发版时请在 src/shared/version.js 的 RELEASES 顶部补一条（tests/version.test.js 会检查）。`;
+      note.append(d);
+    }
+
+    const hist = $('verHistory');
+    hist.textContent = '';
+    const head = document.createElement('div');
+    head.className = 'lbl';
+    head.textContent = '版本记录（最近 5 次）';
+    hist.append(head);
+    if (!info.history.length) {
+      const d = document.createElement('div');
+      d.className = 'ver-empty';
+      d.textContent = '暂无版本变化记录。';
+      hist.append(d);
+    } else {
+      for (const h of info.history.slice(0, 5)) {
+        const row = document.createElement('div');
+        row.className = 'ver-h-row';
+        const left = document.createElement('b');
+        left.textContent = `${h.from ? `v${h.from} → ` : ''}v${h.version}`;
+        const right = document.createElement('span');
+        right.textContent = h.at ? fmtTime(h.at) : '—';
+        row.append(left, right);
+        hist.append(row);
+      }
+    }
+  }
+
+  async function copyVersionInfo() {
+    if (!versionInfo) return;
+    const text = CGR.VERSION.copyText(versionInfo);
+    let ok = false;
+    try {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    } catch (e) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.append(ta);
+      ta.select();
+      try {
+        ok = document.execCommand('copy');
+      } catch (e2) {
+        /* ignore */
+      }
+      ta.remove();
+    }
+    toast(ok ? '版本信息已复制' : '复制失败，请手动截图设置页');
+  }
+
   /* ---------------- 设置（全局） ---------------- */
 
   let settingsDirty = false;
@@ -1229,6 +1357,14 @@
       toast(`将删除 ${n} 条，再点一次确认`);
     });
 
+    // 版本与更新记录
+    $('btnCopyVersion').addEventListener('click', copyVersionInfo);
+    $('hdrVersion').addEventListener('click', () => {
+      const tab = document.querySelector('.tab[data-tab="settings"]');
+      if (tab) tab.click();
+      $('versionCard').scrollIntoView({ block: 'start', behavior: 'smooth' });
+    });
+
     // 设置
     ['mode', 'concurrency', 'folder', 'template', 'minDelayMs', 'maxDelayMs', 'premiseGapMs', 'premiseReplyMs', 'premiseWaitReply', 'timeoutMs', 'maxAttempts', 'onNoImage', 'limitCooldownMin'].forEach((id) => {
       const el = $(id);
@@ -1303,6 +1439,7 @@
     if (area === 'local' && changes.view && changes.view.newValue) {
       render(changes.view.newValue);
     }
+    if (area === 'local' && changes[CGR.VERSION.KEY]) loadVersion();
   });
 
   function startTicker() {
@@ -1319,5 +1456,6 @@
   bind();
   renderRefList();
   loadView();
+  loadVersion();
   startTicker();
 })();

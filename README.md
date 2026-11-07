@@ -146,6 +146,9 @@
 
 ## 六、设置项
 
+设置页最上方是**版本卡片**：显示当前运行版本（如 `v0.5.0`）、上次是从哪个版本更新来的、更新／重载生效时间、这个版本改了什么，以及最近 5 次版本记录。侧边栏顶部也有一个小版本号，点一下直接跳到这里。
+版本号读的是**当前真正运行着的 `manifest.json`**，不是缓存里的字符串，所以：更新完在 `chrome://extensions` 重载扩展，设置页数字变了，就说明新代码已经生效；数字没变就是没重载。点「复制版本信息」可以把版本、更新说明与历史一次复制出来，反馈问题时直接贴。
+
 | 项 | 说明 |
 |---|---|
 | 会话策略 | **每条新开对话**（推荐）/ 同一对话连续 / 多对话并行。默认每条各开一个对话，所以聊天记录是分散的；想在一个页面里看完「提示词 + 图片」的完整对话流，改成「同一对话连续生成」 |
@@ -226,6 +229,7 @@
 manifest.json                  MV3 配置
 src/shared/                    content 与 SW 共用（IIFE 挂 globalThis.CGR，零构建）
   constants.js                 状态枚举 / 消息类型 / 默认配置
+  version.js                   ★ 版本更新说明 + 版本记录计算（设置页显示、发版必改）
   selectors.js                 ★ 全部 DOM 选择器（改版只改这里）
   slug.js                      文件名 slug 化、模板渲染、目录校验
   markdown.js                  ★ Markdown 提示词解析（每个代码块 = 一条）
@@ -255,9 +259,10 @@ tests/
   reset.test.js                一键重置回归（运行态清理 / 数据保留 / 出厂设置）
   attachment-detect.test.js    文件附件产物识别回归（可控 DOM + 时钟）
   attachment-download.test.js  附件下载归位与结果护栏回归（真实 downloads 模块）
+  version.test.js              版本号与更新记录回归（发版一致性 / 升级 / 重载 / 展示）
 ```
 
-八个测试都是零依赖，直接 `node tests/xxx.test.js`（共 69 组）：
+九个测试都是零依赖，直接 `node tests/xxx.test.js`（共 88 组）：
 
 - `scheduling.test.js`：真实 store / lease / orchestrator / scheduler + Chrome API 桩，覆盖标签页复用、假运行中、扫描异常、自动重绑、归属丢失、空闲轮询写入、运行期唤醒。
 - `image-detection.test.js`：真实 `probes.js` / `watcher.js` + 可控 DOM 与时钟，覆盖图片 URL 改版、尺寸误杀、签名 URL 变化、图片晚到、停止按钮失效、残留 toast 误报、参考图排除。
@@ -267,6 +272,7 @@ tests/
 - `reset.test.js`：真实后台模块 + Chrome API 桩，覆盖运行态清理、提示词/前提/设置/参考图保留、已完成图不重跑、`attempt` 清零后可再次领取、中止循环且不新开标签页、旧上报不重复下载、清空全部数据恢复出厂设置。
 - `attachment-detect.test.js`：真实 `probes.js` / `watcher.js`，覆盖「只有附件卡片没有 `<img>`」、sandbox 图片链接、旧卡片差集、用户气泡降噪、消息选择器失效时的回复信号、点击目标避开外链、诊断字段。
 - `attachment-download.test.js`：真实 store / lease / downloads / orchestrator，覆盖卡片取流与点击、`onDeterminingFilename` 归位到批次目录、下载完成推进为已完成、http 直链仍走 A、已有产物时 NO_IMAGE 不重发、点击超时收敛。
+- `version.test.js`：真实 `version.js`，强制 `manifest.version` 与 `RELEASES` 最新一条一致（发版漏写更新说明会直接失败），覆盖说明结构、版本倒序、脚本清单引入、首次安装 / 升级 / 同版本重载 / 历史上限 / 展示与复制文本。
 
 改发送、出图检测或结果处理前请跑对应测试，避免又退回「前提发不出去」或「已出图却判失败 → 重复生图」。
 
@@ -277,3 +283,17 @@ tests/
 3. **出图检测靠「发送前全页快照 → 发送后新出现的产物」的差集**，产物包括 `<img>`、图片链接、文件附件卡片三类；不能只认「最后一条 assistant 消息」，也不能只扫 `<img>`（附件卡片形态会全漏），更不能靠 URL 白名单硬判（ChatGPT 换域名就全漏）。快照必须同时记录 img / link / card 三类签名。全页扫之后必须用尺寸、位置、alt、图片语义与用户气泡/侧边栏排除装饰图和参考图，否则别的对话的缩略图会被抓错。
 4. **图片快照在前提之后、正式提示词之前拍**：所以前提阶段即使出了图也会被差集排除掉，不会被误当成结果下载。
 5. **前提节奏是「检测到回复写完」事件驱动，不是固定 sleep**：`src/content/premise.js` 是这段逻辑的唯一出处，content.js 只做适配。每条前提（含第一条和最后一条）之后都必须走 `waitForReply()`：回复文字出现 → 生成结束 → 文本稳定，再补足最小间隔；超时只能警告后继续，绝不能重发或把批次置异常。改这里前先跑 `tests/premise-pacing.test.js`。
+
+## 十、版本与发版规范
+
+**版本号只有一个来源**：`manifest.json` 的 `version`。侧边栏通过 `chrome.runtime.getManifest().version` 直接读当前真正运行着的代码；`src/shared/version.js` 不硬编码当前版本，只维护每个版本的更新说明（`RELEASES`）与版本变化的计算逻辑。
+
+每次改完代码发版，必须做三步：
+
+1. `manifest.json` 的 `version` +1（如 `0.5.0` → `0.5.1`）
+2. 在 `src/shared/version.js` 的 `RELEASES` **顶部**补一条同版本记录：`version` / `date` / `title` / `changes`
+3. 跑 `node tests/version.test.js`（或全量 `for f in tests/*.test.js; do node "$f"; done`）。两步的版本号不一致会直接失败，设置页也会显示「缺少更新说明」
+
+提交推送后，在 `chrome://extensions` 重新加载扩展并刷新 ChatGPT 页。Service Worker 的 `onInstalled` 会把「从 vX 更新到 vY、什么时间」写进 `chrome.storage.local` 的 `cgrVersion`；SW 冷启动会兜底补记漏掉的升级，同版本重载只刷新生效时间、不会重复记一条更新（恢复出厂设置后会重建这条记录，因为它不是用户数据）。设置页的版本卡片和顶部徽标随即显示新版本号。
+
+> 想确认「更新到底生效没有」，只看设置页的版本数字：变了就是新代码在跑，没变就是还没重载。点「复制版本信息」会把版本号、更新说明、历史记录拼成文本，排障时直接贴出来。

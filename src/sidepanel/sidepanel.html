@@ -15,7 +15,10 @@
           <div class="hdr-sub" id="hdrSub">还没有批次</div>
         </div>
       </div>
-      <div class="status-pill" id="statusPill">空闲</div>
+      <div class="hdr-right">
+        <button id="hdrVersion" class="hdr-ver" title="当前运行版本；点击查看版本与更新记录">v—</button>
+        <div class="status-pill" id="statusPill">空闲</div>
+      </div>
     </header>
 
     <!-- 批次切换 -->
@@ -152,6 +155,23 @@
 
       <!-- ========== 设置（全局） ========== -->
       <section class="pane" id="pane-settings">
+        <div class="card version-card" id="versionCard">
+          <div class="ver-head">
+            <div>
+              <div class="lbl">当前版本</div>
+              <div class="ver-num" id="verNumber">v—</div>
+            </div>
+            <span class="ver-state" id="verState">读取中…</span>
+          </div>
+          <div class="ver-lines" id="verMeta"></div>
+          <div class="ver-note" id="verNote"></div>
+          <div class="ver-history" id="verHistory"></div>
+          <div class="row gap">
+            <button id="btnCopyVersion" class="btn small">复制版本信息</button>
+            <span class="hint">每次更新后这里会显示新版本号与更新说明；数字没变说明扩展还没重新加载。</span>
+          </div>
+        </div>
+
         <div class="card">
           <div class="field">
             <label class="lbl" for="mode">会话策略</label>
@@ -312,6 +332,7 @@
     <div class="toast" id="toast"></div>
 
     <script src="../shared/constants.js"></script>
+    <script src="../shared/version.js"></script>
     <script src="../shared/slug.js"></script>
     <script src="../shared/markdown.js"></script>
     <script src="sidepanel.js"></script>

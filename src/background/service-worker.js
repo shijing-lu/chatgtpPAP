@@ -5,6 +5,7 @@ importScripts(
   '../shared/selectors.js',
   '../shared/slug.js',
   '../shared/sched.js',
+  '../shared/version.js',
   './store.js',
   './lease.js',
   './downloads.js',
@@ -38,6 +39,30 @@ async function boot() {
   }
   ensureWakeTicker();
 }
+
+/* ---------------- 版本变化记录（设置页显示用） ----------------
+ * manifest.version 是唯一版本来源。onInstalled 负责记「从哪个版本升上来」，
+ * 冷启动兜底补上漏记的升级；同版本重载只刷新生效时间，不重复记一条更新。
+ * 用 Promise 链串行，避免 onInstalled 与冷启动同时读写同一个 key。 */
+
+let versionChain = Promise.resolve();
+
+function noteVersion(details) {
+  versionChain = versionChain
+    .then(async () => {
+      const version = chrome.runtime.getManifest().version;
+      const data = await chrome.storage.local.get(CGR.VERSION.KEY);
+      const prev = data[CGR.VERSION.KEY];
+      const changed = !prev || prev.version !== version;
+      if (!changed && !details) return;
+      const next = CGR.VERSION.record(prev, version, Date.now(), details || null);
+      await chrome.storage.local.set({ [CGR.VERSION.KEY]: next });
+    })
+    .catch(() => {});
+  return versionChain;
+}
+
+noteVersion(null); // SW 每次唤醒都兜底检查一次；同版本不写盘
 
 /* ---------------- 运行期唤醒（不依赖页面定时器） ---------------- */
 
@@ -92,12 +117,13 @@ function ensureWakeTicker() {
   }, CGR.LIMITS.wakeTickMs);
 }
 
-chrome.runtime.onInstalled.addListener(async () => {
+chrome.runtime.onInstalled.addListener(async (details) => {
   try {
     await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
   } catch (e) {
     /* ignore */
   }
+  noteVersion(details);
   sched.ensure();
   boot().catch(() => {});
 });
@@ -344,7 +370,11 @@ async function handleCommand(msg) {
     case CGR.CMD.RESET: {
       // 清掉唤醒节留，避免重置后旧的重绑时间戳继续影响自愈
       wakeRebindAt.clear();
-      return orch.reset({ scope: p.scope });
+      const out = await orch.reset({ scope: p.scope });
+      // 恢复出厂设置会 storage.local.clear()。版本记录不是用户数据，重建一条，
+      // 否则设置页会丢掉「当前版本 / 更新记录」。
+      if (out && out.ok && p.scope === CGR.RESET_SCOPE.FACTORY) await noteVersion(null);
+      return out;
     }
     case CGR.CMD.EXPORT_LOGS: {
       const b = store.getBatch(p.batchId);
