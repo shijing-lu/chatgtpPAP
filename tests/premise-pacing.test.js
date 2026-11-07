@@ -1,13 +1,15 @@
 /* 前提发送节奏回归测试（零依赖）：node tests/premise-pacing.test.js
  *
- * 复现「前提提示词一发完，第一条生图提示词就发出去了，ChatGPT 没时间接收」：
- *  - 旧逻辑最后一条前提之后只 sleep 600ms，第一条生图提示词贴着前提发出去
- *  - 「发送成功」只判输入框清空 / 气泡挂上 DOM（乐观 UI），不等于服务端已写进会话
- *  - 前提模式 allowStop 默认 1.5 秒就点停止生成，把服务端对前提的处理也截断了
- *  - ack 超时被当成失败并重试，会重复消耗额度
+ * 用户要求：第一条前提发出去后必须等 ChatGPT 回复，检测到回复后才能发下一条。
+ * 覆盖：
+ *  - 回复文字出现还不够，要等回复写完（停止生成消失 + 文本稳定）
+ *  - 第一条没等到回复前绝不发第二条；最后一条之后同样要等，才轮到生图提示词
+ *  - 等不到回复按超时放行，只警告、不重发、不判失败
+ *  - 回复秒回也补足最小间隔，防乐观 UI 假完成
+ *  - 停止按钮选择器失效时靠文本稳定兜底；关闭开关回到固定窗口模式
  *
- * 本测试只加载 constants / sched / premise 三个真实模块，页面能力全部注入桩，
- * 用虚拟时钟把 4~8 秒的窗口同步推进，跑起来是毫秒级。
+ * 只加载 constants / sched / premise 三个真实模块，页面能力全部注入桩；
+ * 虚拟时钟同步推进，回复按时间线出现文字 → 写完，跑起来是毫秒级。
  */
 const fs = require('fs');
 const vm = require('vm');
@@ -17,13 +19,15 @@ const assert = require('assert');
 const ROOT = path.join(__dirname, '..');
 const load = (f) => vm.runInThisContext(fs.readFileSync(path.join(ROOT, f), 'utf8'), { filename: f });
 
-/* ---------- 可控时钟 ---------- */
+/* ---------- 可控时钟：每次 sleep 推进虚拟时间并驱动页面回复进度 ---------- */
 let NOW = 1000000;
+let tickHook = null;
 const realNow = Date.now;
 const realSetTimeout = global.setTimeout;
 Date.now = () => NOW;
 global.setTimeout = (fn, ms) => {
   NOW += ms || 0;
+  if (tickHook) tickHook();
   fn();
   return 0;
 };
@@ -36,38 +40,66 @@ const CGR = global.CGR;
 const premise = global.CGR_PREMISE;
 
 /* ---------- 页面能力桩 ---------- */
-function makeHarness(cfg) {
+function makeHarness(cfg, opts) {
+  const o = opts || {};
+  const textAt = o.replyTextAt != null ? o.replyTextAt : 800;   // 回复文字出现
+  const doneAt = o.replyDoneAt != null ? o.replyDoneAt : 3000;  // 回复写完
+  const neverReply = !!o.neverReply;
+  const noStopButton = !!o.noStopButton;                        // 停止按钮选择器失效
   const events = [];
   const logs = [];
-  const state = { msgCount: 0, assistantCount: 0, generating: false };
+  const state = { msgCount: 0, assistantCount: 0, lastText: '', bodyLen: 1000, generating: false };
+  let pending = null;
+  let seq = 0;
+  let sendIndex = 0;
+  let failAt = -1;
+  let aborted = false;
+
+  function advance() {
+    if (!pending) return;
+    const t = Date.now() - pending.at;
+    if (!pending.textShown && !neverReply && t >= textAt) {
+      pending.textShown = true;
+      state.assistantCount += 1;
+      state.lastText = `回复${pending.seq}（正在写）`;
+      state.bodyLen += 200;
+    }
+    if (pending.textShown && !pending.finished && !neverReply && t >= Math.max(doneAt, textAt)) {
+      pending.finished = true;
+      state.lastText = `回复${pending.seq}（完成）`;
+      state.generating = false;
+    }
+  }
+  tickHook = advance;
+
   const probe = {
     allMsgCount: () => state.msgCount,
     assistantCount: () => state.assistantCount,
-    isGenerating: () => state.generating
+    isGenerating: () => (noStopButton ? false : state.generating),
+    lastAssistantText: () => state.lastText,
+    bodyTextLen: () => state.bodyLen
   };
-  let sendIndex = 0;
-  let failAt = -1;
-  let ackMode = 'ok'; // ok | assistant | none
-  let aborted = false;
 
-  async function sendPrompt(text, _cfg, opts) {
+  async function sendPrompt(text, _cfg, sentOpts) {
     const i = sendIndex++;
-    events.push({ kind: 'send', i, text, at: Date.now(), opts: opts || {} });
+    events.push({ kind: 'send', i, text, at: Date.now(), opts: sentOpts || {} });
     if (i === failAt) {
       return { ok: false, code: 'submit-failed', diagnostic: ['第1次：提交未生效（submit-failed）'] };
     }
     state.msgCount += 1;
-    if (ackMode === 'ok') state.generating = true;
-    if (ackMode === 'assistant') state.assistantCount += 1;
+    state.generating = true;
+    seq += 1;
+    pending = { at: Date.now(), seq, textShown: false, finished: false };
     await CGR.sleep(50);
     events.push({ kind: 'sent', i, text, at: Date.now() });
     return { ok: true, method: 'click', diagnostic: [] };
   }
 
-  async function waitSendable(opts) {
-    events.push({ kind: 'waitSendable', at: Date.now(), opts: opts || {} });
-    if (state.generating && opts.allowStop) {
+  async function waitSendable(sOpts) {
+    events.push({ kind: 'waitSendable', at: Date.now(), opts: sOpts || {} });
+    if (state.generating && sOpts.allowStop) {
       state.generating = false;
+      pending = null;
       return { ok: true, stopped: true, reason: 'stopped-text-reply' };
     }
     return { ok: true, stopped: false, reason: 'idle' };
@@ -90,175 +122,157 @@ function makeHarness(cfg) {
     deps,
     sends: () => events.filter((e) => e.kind === 'send'),
     sents: () => events.filter((e) => e.kind === 'sent'),
-    setAckMode: (m) => { ackMode = m; },
+    stops: () => events.filter((e) => e.kind === 'waitSendable'),
     fail: (n) => { failAt = n; },
     abort: () => { aborted = true; }
   };
 }
 
 const GAP = 4000;
+const REPLY_MS = 3000;
 
 async function main() {
-  /* A：最后一条前提之后仍留满接收窗口，第一条生图提示词不会贴着前提发出 */
+  /* A：第一条前提没检测到回复前绝不发第二条 */
   {
     const h = makeHarness({});
     const res = await premise.apply(['前提一：风格', '前提二：构图', '前提三：色调'], h.deps);
     assert.strictEqual(res.ok, true);
-    const lastSentAt = h.sents().pop().at;
-    const applyEnd = Date.now();
-    assert.ok(
-      applyEnd - lastSentAt >= GAP,
-      `最后一条前提之后也必须留满 ${GAP}ms，实际只留 ${applyEnd - lastSentAt}ms`
-    );
-    // 模拟 content.js 在 apply 之后紧接着发第一条正式生图提示词
-    await h.deps.sendPrompt('第一条生图提示词', {}, {});
-    const formalAt = h.sends().pop().at;
-    assert.ok(
-      formalAt - lastSentAt >= GAP,
-      `第一条生图提示词距最后一条前提太近：${formalAt - lastSentAt}ms`
-    );
-    console.log('PASS A: 最后一条前提之后仍留满接收窗口，生图提示词不再贴着前提发出');
-  }
-
-  /* B：每条前提之间都有完整间隔，不再是 sleep(1200) 就发下一条 */
-  {
-    const h = makeHarness({});
-    await premise.apply(['甲', '乙', '丙'], h.deps);
+    assert.strictEqual(res.gaps.length, 3);
+    assert.ok(res.gaps.every((g) => g.replied && g.finished), '每条前提都必须检测到完整回复');
     const sends = h.sends();
+    const readyLogs = h.logs.filter((l) => /已检测到 ChatGPT 回复并写完/.test(l.message));
+    assert.strictEqual(readyLogs.length, 3, '每条前提都要有「检测到回复」日志');
     for (let i = 1; i < sends.length; i++) {
-      assert.ok(
-        sends[i].at - sends[i - 1].at >= GAP,
-        `第 ${i + 1} 条前提距上一条只有 ${sends[i].at - sends[i - 1].at}ms`
-      );
+      assert.ok(sends[i].at - sends[i - 1].at >= REPLY_MS, `第 ${i + 1} 条前提发得太早`);
+      assert.ok(sends[i].at >= readyLogs[i - 1].at, '下一条必须在上一条回复检测之后才发出');
     }
-    console.log('PASS B: 前提逐条留间隔，不再连珠炮发送');
+    assert.strictEqual(h.stops().length, 0, '回复已经写完，不该再点停止生成截断回复');
+    console.log('PASS A: 第一条等回复，检测到回复后才允许发第二条');
   }
 
-  /* C：ack 立刻命中也必须补足最小间隔（乐观 UI 的 ack 早于服务端落库） */
+  /* B：最后一条前提之后同样等回复，之后才轮到第一条生图提示词 */
   {
     const h = makeHarness({});
+    await premise.apply(['甲', '乙'], h.deps);
+    assert.strictEqual(h.state.generating, false, 'apply 结束时回复应已写完');
+    const lastSentAt = h.sents().pop().at;
+    assert.ok(Date.now() - lastSentAt >= REPLY_MS, '最后一条之后也必须等回复');
+    await h.deps.sendPrompt('第一条生图提示词', {}, {});
+    assert.ok(h.sends().pop().at - lastSentAt >= REPLY_MS, '生图提示词不能贴着前提发出');
+    console.log('PASS B: 最后一条前提回复后才发第一条生图提示词');
+  }
+
+  /* C：不是只看「文字出现」，必须等回复写完 */
+  {
+    const h = makeHarness({});
+    const res = await premise.apply(['甲'], h.deps);
+    assert.ok(res.gaps[0].waitedMs >= REPLY_MS, `回复 0.8 秒就出字，但必须等写完；实际 ${res.gaps[0].waitedMs}ms`);
+    assert.ok(h.logs.some((l) => /回复并写完/.test(l.message)));
+    console.log('PASS C: 回复文字出现不算数，等写完才放行');
+  }
+
+  /* D：回复秒回也要补足最小间隔（乐观 UI 保护） */
+  {
+    const h = makeHarness({}, { replyTextAt: 0, replyDoneAt: 0 });
     const res = await premise.apply(['甲', '乙'], h.deps);
-    assert.strictEqual(res.gaps.length, 2);
-    assert.ok(res.gaps.every((g) => g.acked === true), '正常情况应拿到服务端响应信号');
-    assert.ok(res.gaps.every((g) => g.waitedMs >= GAP), 'ack 命中也要补足最小间隔');
-    console.log('PASS C: ack 秒回也补足最小接收窗口');
+    assert.ok(res.gaps.every((g) => g.finished && g.waitedMs >= GAP), '秒回也要补足最小间隔');
+    console.log('PASS D: 回复秒回仍补足最小间隔');
   }
 
-  /* D：等不到接收信号只警告并继续，绝不失败、绝不重发前提 */
+  /* E：等不到回复超时放行，只警告、不重发、不判失败 */
   {
-    const h = makeHarness({});
-    h.setAckMode('none');
-    const res = await premise.apply(['甲', '乙', '丙'], h.deps);
-    assert.strictEqual(res.ok, true, 'ack 超时不能把批次判失败');
-    assert.strictEqual(h.sends().length, 3, 'ack 超时绝不能重发前提');
-    assert.ok(res.gaps.every((g) => g.acked === false && g.waitedMs >= GAP));
-    assert.ok(h.logs.some((l) => l.level === 'warn' && /未收到响应信号/.test(l.message)), '应留下警告日志');
-    console.log('PASS D: 接收信号超时只警告放行，不重发、不判失败');
-  }
-
-  /* E：只认「接收确认」，不读回复、不等回复结束、不下载、不看图 */
-  {
-    const h = makeHarness({});
+    const h = makeHarness({ premiseReplyMs: 10000 }, { neverReply: true });
     const res = await premise.apply(['甲', '乙'], h.deps);
-    assert.strictEqual(res.images, undefined, '前提阶段不产出图片结果');
-    assert.ok(
-      !h.logs.some((l) => /等待出图|开始下载|回复已完成|等待模型回复/.test(l.message)),
-      '日志里不应出现等回复/下载动作'
-    );
-    assert.ok(
-      h.logs.some((l) => /不读回复、不等生成结束/.test(l.message)),
-      '日志应明确写出前提阶段不等回复'
-    );
-    // 所有「停止生成」动作都晚于对应前提的接收窗口
-    const sents = h.sents();
-    for (const ev of h.events.filter((e) => e.kind === 'waitSendable')) {
-      const prior = sents.filter((s) => s.at <= ev.at).pop();
-      if (prior) assert.ok(ev.at - prior.at >= GAP, '停止文本回复必须晚于接收窗口');
-    }
-    assert.strictEqual(h.state.generating, false, 'apply 结束时输入框应已恢复可发送');
-    console.log('PASS E: 不等回复、不下载，停止动作永远晚于接收窗口');
+    assert.strictEqual(res.ok, true, '等回复超时不能判失败');
+    assert.strictEqual(h.sends().length, 2, '等回复超时绝不能重发前提');
+    assert.ok(res.gaps.every((g) => g.timedOut && !g.finished));
+    assert.ok(h.logs.some((l) => l.level === 'warn' && /没检测到完整回复/.test(l.message)));
+    console.log('PASS E: 等不到回复按超时放行，只警告不重发');
   }
 
-  /* F：前提模式的停止等待被抬到接收窗口长度，不会 1.5 秒就截断服务端处理 */
+  /* F：停止按钮选择器失效时靠回复文本稳定兜底，不会白等满超时 */
+  {
+    const h = makeHarness({ premiseReplyMs: 30000 }, { noStopButton: true });
+    const res = await premise.apply(['甲'], h.deps);
+    assert.strictEqual(res.ok, true);
+    assert.ok(res.gaps[0].finished, '没有停止按钮也要能判定回复写完');
+    assert.ok(res.gaps[0].waitedMs < 30000, '不该白等满超时');
+    console.log('PASS F: 停止按钮选择器失效时靠文本稳定兜底');
+  }
+
+  /* G：关掉「等回复」开关回到固定窗口模式 */
+  {
+    const h = makeHarness({ premiseWaitReply: false });
+    const res = await premise.apply(['甲', '乙'], h.deps);
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(res.waitReply, false);
+    assert.ok(res.gaps.every((g) => g.finished === undefined && typeof g.acked === 'boolean'));
+    assert.ok(h.logs.some((l) => /未等回复/.test(l.message)));
+    console.log('PASS G: 关闭开关后回到固定窗口模式');
+  }
+
+  /* H：发送失败立即终止、中止不发送、单条前提也等回复 */
+  {
+    const a = makeHarness({});
+    a.fail(1);
+    const r1 = await premise.apply(['甲', '乙', '丙'], a.deps);
+    assert.strictEqual(r1.ok, false);
+    assert.ok(/send-failed\(submit-failed\)/.test(r1.reason));
+    assert.strictEqual(a.sends().length, 2, '失败后不得继续发剩下的前提');
+    assert.ok(a.logs.some((l) => l.level === 'warn' && /提交未生效/.test(l.message)));
+
+    const b = makeHarness({});
+    b.abort();
+    const r2 = await premise.apply(['甲'], b.deps);
+    assert.strictEqual(r2.reason, 'aborted');
+    assert.strictEqual(b.sends().length, 0);
+
+    const c = makeHarness({});
+    const r3 = await premise.apply(['唯一一条前提'], c.deps);
+    assert.strictEqual(r3.gaps.length, 1);
+    assert.strictEqual(r3.gaps[0].finished, true);
+    console.log('PASS H: 失败/中止/单条前提的边界行为正确');
+  }
+
+  /* I：配置钳制与老配置回落默认值 */
+  {
+    assert.deepStrictEqual(premise.pacing({}), {
+      gapMs: 4000, replyMs: 60000, ackMs: 8000, waitReply: true
+    }, '老配置缺字段应回落默认且默认开启等回复');
+    assert.deepStrictEqual(
+      premise.pacing({ premiseGapMs: 999999999, premiseReplyMs: 999999999, premiseAckMs: 999999999 }),
+      { gapMs: 30000, replyMs: 300000, ackMs: 30000, waitReply: true }
+    );
+    assert.deepStrictEqual(
+      premise.pacing({ premiseGapMs: -1, premiseReplyMs: 0, premiseAckMs: 0, premiseWaitReply: false }),
+      { gapMs: 4000, replyMs: 60000, ackMs: 8000, waitReply: false }
+    );
+    console.log('PASS I: 配置钳制、老配置回落默认、开关生效');
+  }
+
+  /* J：前提发送仍不会 1.5 秒就点停止生成 */
   {
     const h = makeHarness({});
     await premise.apply(['甲', '乙'], h.deps);
     for (const ev of h.sends()) {
       assert.strictEqual(ev.opts.allowStop, true);
-      assert.ok(ev.opts.naturalWaitMs >= GAP, `前提的 naturalWaitMs 太短：${ev.opts.naturalWaitMs}`);
+      assert.ok(ev.opts.naturalWaitMs >= GAP, `naturalWaitMs 太短：${ev.opts.naturalWaitMs}`);
     }
-    console.log('PASS F: 前提发送前至少等满接收窗口才可能点停止生成');
+    console.log('PASS J: 前提停止动作不会提前截断服务端处理');
   }
 
-  /* G：发送失败立即停下，不重发、不给后续前提留窗口，诊断写进日志 */
+  /* K：前提阶段不产出图片、不下载 */
   {
     const h = makeHarness({});
-    h.fail(1);
-    const res = await premise.apply(['甲', '乙', '丙'], h.deps);
-    assert.strictEqual(res.ok, false);
-    assert.ok(/send-failed\(submit-failed\)/.test(res.reason));
-    assert.strictEqual(h.sends().length, 2, '失败后不得继续发剩下的前提');
-    assert.ok(h.logs.some((l) => l.level === 'warn' && /提交未生效/.test(l.message)), '诊断应写进日志');
-    console.log('PASS G: 发送失败立即终止，不重发、不带后续窗口');
-  }
-
-  /* H：中止后一条都不发 */
-  {
-    const h = makeHarness({});
-    h.abort();
     const res = await premise.apply(['甲', '乙'], h.deps);
-    assert.strictEqual(res.ok, false);
-    assert.strictEqual(res.reason, 'aborted');
-    assert.strictEqual(h.sends().length, 0);
-    console.log('PASS H: 中止信号生效，不再发送任何前提');
-  }
-
-  /* I：自定义间隔生效；异常配置被钳制，老配置缺字段回落默认值 */
-  {
-    const h = makeHarness({ premiseGapMs: 6000, premiseAckMs: 3000 });
-    const res = await premise.apply(['甲', '乙'], h.deps);
-    assert.strictEqual(h.sends()[1].at - h.sends()[0].at >= 6000, true);
-    assert.strictEqual(res.gapMs, 6000);
-
-    assert.deepStrictEqual(premise.pacing({}), { gapMs: 4000, ackMs: 8000 }, '老配置缺字段应回落默认');
-    assert.deepStrictEqual(
-      premise.pacing({ premiseGapMs: 999999999, premiseAckMs: 999999999 }),
-      { gapMs: 30000, ackMs: 30000 },
-      '超大值应被钳制'
-    );
-    assert.deepStrictEqual(
-      premise.pacing({ premiseGapMs: -1, premiseAckMs: 0 }),
-      { gapMs: 4000, ackMs: 8000 },
-      '非法值应回落默认'
-    );
-    console.log('PASS I: 自定义间隔生效，异常配置钳制、老配置回落默认');
-  }
-
-  /* J：只有一条前提时，同样要给第一条生图提示词留窗口 */
-  {
-    const h = makeHarness({});
-    const res = await premise.apply(['唯一一条前提'], h.deps);
-    assert.strictEqual(res.ok, true);
-    const lastSentAt = h.sents().pop().at;
-    assert.ok(Date.now() - lastSentAt >= GAP, '单条前提也必须留窗口');
-    assert.strictEqual(res.gaps.length, 1);
-    console.log('PASS J: 只有一条前提时同样留接收窗口');
-  }
-
-  /* K：assistant 回复节点也是有效的接收信号（停止按钮选择器失效时不误判） */
-  {
-    const h = makeHarness({});
-    h.setAckMode('assistant');
-    const res = await premise.apply(['甲'], h.deps);
-    assert.strictEqual(res.ok, true);
-    assert.strictEqual(res.gaps[0].acked, true, '新回复节点应算服务端已接收');
-    assert.ok(res.gaps[0].waitedMs >= GAP);
-    console.log('PASS K: 停止按钮选择器失效时靠新回复节点也能确认接收');
+    assert.strictEqual(res.images, undefined);
+    assert.ok(!h.logs.some((l) => /等待出图|开始下载|下载完成/.test(l.message)));
+    console.log('PASS K: 前提阶段不看图、不下载');
   }
 
   Date.now = realNow;
   global.setTimeout = realSetTimeout;
-  console.log('\nALL PASS — 前提接收窗口回归通过（11 组）');
+  console.log('\nALL PASS — 前提等回复节奏回归通过（11 组）');
 }
 
 main().catch((e) => {

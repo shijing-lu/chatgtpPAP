@@ -453,6 +453,7 @@
     allMsgCount,
     assistantCount,
     lastAssistantText,
+    bodyTextLen,
     hasLoginWall,
     isImageSrc,
     normSrc,

@@ -144,7 +144,7 @@
             <button id="btnAddPremise" class="add-btn" title="添加前提">＋</button>
           </div>
           <div class="hint" id="premiseHint">当前 0 条</div>
-          <div class="hint">每条新对话开始时逐条发送，发完就走，不等回复、不生图、不下载；各批次互不影响。</div>
+          <div class="hint">每条新对话开始时逐条发送，每条都等 ChatGPT 回复写完才发下一条；不生图、不下载；各批次互不影响。</div>
         </div>
         <div class="list" id="premiseList"></div>
         <div class="empty" id="premiseEmpty">这个批次还没有前提设定。</div>
@@ -194,17 +194,20 @@
 
           <div class="field two">
             <div>
-              <label class="lbl" for="premiseGapMs">前提接收间隔（秒）</label>
+              <label class="lbl" for="premiseGapMs">前提最小间隔（秒）</label>
               <input id="premiseGapMs" class="input" type="number" min="2" max="30" step="1" />
             </div>
             <div>
-              <label class="lbl" for="premiseAckMs">接收确认上限（秒）</label>
-              <input id="premiseAckMs" class="input" type="number" min="1" max="30" step="1" />
+              <label class="lbl" for="premiseReplyMs">等回复超时（秒）</label>
+              <input id="premiseReplyMs" class="input" type="number" min="5" max="300" step="5" />
             </div>
           </div>
-          <div class="hint">
-            每条前提发出后，至少等这么久才发下一条／开始生图；期间确认服务端已接住消息，但<b>不读回复、不等回复结束、不下载</b>。
-            <b>最后一条前提之后同样生效</b>，避免第一条生图提示词贴着前提发出去。等不到确认信号只记警告并继续，不会重发。
+          <div class="field">
+            <label class="chk"><input type="checkbox" id="premiseWaitReply" /><span>每条前提都等 ChatGPT 回复写完，才发下一条（含第一条）</span></label>
+            <div class="hint">
+              检测到回复文字出现、停止生成消失、回复文本稳定后才继续；<b>最后一条前提之后同样要等</b>，之后才发第一条生图提示词。
+              超时只记警告并继续，不会重发。关掉这个开关则只按「前提最小间隔」放行，不等回复。
+            </div>
           </div>
 
           <div class="field two">
