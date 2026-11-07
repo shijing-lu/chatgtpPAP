@@ -45,6 +45,28 @@
     return toText(list, Object.assign({}, opts, { indexes: indexes || [] }));
   }
 
+  /** 兜底：直接读 chrome.storage.local 里的条目原文。
+   * 后台版本比侧边栏旧时（没注册 GET_PROMPTS，会回 unknown-command）也能复制完整提示词。
+   * 存储布局 item:<batchId>:<index> 从早期版本起没变过，且只按需要的键取，不会把
+   * 参考图的 dataURL 一起读出来。 */
+  async function readStorage(storage, bid, count, indexes) {
+    if (!storage || !bid) return [];
+    const wanted = Array.isArray(indexes) && indexes.length ? new Set(indexes.map(Number)) : null;
+    const n = Math.max(0, Number(count) || 0);
+    if (!n) return [];
+    const keys = [];
+    for (let i = 0; i < n; i++) keys.push(`item:${bid}:${i}`);
+    let got = {};
+    try {
+      got = (await storage.get(keys)) || {};
+    } catch (e) {
+      return [];
+    }
+    return keys
+      .map((k, i) => ({ index: i, prompt: String((got[k] && got[k].prompt) || '') }))
+      .filter((it) => it.prompt.trim() && (!wanted || wanted.has(it.index)));
+  }
+
   /** 写剪贴板：优先 async Clipboard API，扩展页被限制时退回 execCommand。
    * 返回 boolean，不抛异常，调用方据此提示成功/失败。 */
   async function write(text) {
@@ -89,6 +111,7 @@
     all,
     selected,
     toText,
+    readStorage,
     write
   };
 })(typeof globalThis !== 'undefined' ? globalThis : self);

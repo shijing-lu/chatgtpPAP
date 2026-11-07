@@ -1179,6 +1179,15 @@
       if (phase === 'sent') {
         item.status = S.GENERATING;
         item.ts = Object.assign({}, item.ts, { sentAt: Date.now() });
+        // 这一条真的发出去了，说明页面发送链路是好的：把之前的失败计数清零。
+        // 以前只在「成功出图」时清零，于是两次不相邻的 SEND_FAILED（中间夹着
+        // 好几条成功任务）也会累计到 2，把整批无辜暂停 —— 表现为「跑一半停了」。
+        sendFailStreak = 0;
+        const pb = store.getBatch(item.batchId);
+        if (pb && pb.premiseFailStreak) {
+          pb.premiseFailStreak = 0;
+          await store.putBatch(pb);
+        }
       }
       if (item.lease) {
         item.lease.renewedAt = Date.now();

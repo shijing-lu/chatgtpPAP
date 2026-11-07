@@ -122,6 +122,20 @@
       }
       if (ids.length) await store.setRuntime({ activeTabs: alive });
 
+      // ②.5 看门狗：单条任务不能无限占着 ACTIVE。
+      // 页面心跳每 20 秒续一次租约，sweepExpired 永远等不到过期；而下面的自愈
+      // 看到 anyActive 会直接跳过 —— 一条卡死的任务就能把整批队列冻住，
+      // 表现正是「执行到一半就不执行了」。这里按任务总时长强制收敛，
+      // 已发过提示词的一律转「待确认」，绝不重发；收敛后立刻唤醒页面继续下一条。
+      const stuck = await lease.sweepStuck();
+      const exhausted = await lease.normalizeExhausted();
+      const wakeIds = new Set();
+      for (const it of stuck.concat(exhausted)) if (it.batchId) wakeIds.add(it.batchId);
+      for (const bid of wakeIds) {
+        const bb = store.getBatch(bid);
+        if (bb && bb.status === G.RUNNING) await orch.wakeBatch(bid);
+      }
+
       // ③ 批次在跑，但它的标签页全都无响应（多半被浏览器冻结了）→ 把窗口切到前台解冻
       for (const b of store.listBatches()) {
         if (b.status !== G.RUNNING) continue;

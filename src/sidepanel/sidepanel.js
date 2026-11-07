@@ -67,20 +67,36 @@
   }
 
   /** 复制完整提示词：视图里的 p 只有 240 字预览，所以向后台取原文。
+   *  后台回 unknown-command 说明它还是旧版本（没注册 GET_PROMPTS），
+   *  这时直接读 storage 里的条目原文兜底，不让「复制」变成死按钮。
    *  indexes 为空 = 整批；否则只复制指定条目（单条按钮／多选复制）。 */
   async function copyPrompts(indexes) {
     const bid = curId();
     if (!bid) return toast('还没有批次');
     const wanted = Array.isArray(indexes) && indexes.length ? indexes : [];
     const res = await send(CGR.CMD.GET_PROMPTS, { batchId: bid, indexes: wanted });
-    if (!res || !res.ok) return toast((res && res.error) || '读取提示词失败');
-    const list = res.prompts || [];
+    const stale = !res || !res.ok ? String((res && res.error) || '') : '';
+    let list = res && res.ok ? res.prompts || [] : [];
+    if (!list.length) {
+      const c = cur();
+      const total = (c && c.counts && c.counts.total) || 0;
+      list = await CGR.PROMPT_COPY.readStorage(chrome.storage.local, bid, total, wanted);
+    }
+    if (!list.length) {
+      if (stale === 'unknown-command') return toast('后台还是旧版本，请到 chrome://extensions 重新加载扩展');
+      return toast(stale || '没有可复制的提示词');
+    }
+
     const text = wanted.length
       ? CGR.PROMPT_COPY.selected(list, wanted)
       : CGR.PROMPT_COPY.all(list);
     if (!text) return toast('没有可复制的提示词');
     const ok = await CGR.PROMPT_COPY.write(text);
-    toast(ok ? `已复制 ${list.length} 条完整提示词` : '复制失败，请检查剪贴板权限');
+    if (!ok) return toast('复制失败，请检查剪贴板权限');
+    // 后台没注册 GET_PROMPTS 说明扩展没重载完；数据已经从 storage 兜底取到了，
+    // 但用户仍需重载才能拿到这一版的后台修复。
+    if (stale === 'unknown-command') return toast(`已复制 ${list.length} 条（后台仍是旧版本，建议重新加载扩展）`);
+    toast(`已复制 ${list.length} 条完整提示词`);
   }
 
   /* ---------------- 渲染 ---------------- */
@@ -94,6 +110,35 @@
     idle: ''
   };
 
+  /** 批次停下的原因必须一眼可见：状态胶囊太短，title 又要悬停才出现，
+   *  用户只会看到「跑着跑着就不动了」。暂停/异常/限额冷却都在这里摊开写。 */
+  function renderNotice(c, status) {
+    const el = $('hdrNotice');
+    if (!el) return;
+    const err = (c && c.lastError) || '';
+    let text = '';
+    let cls = 'hdr-notice ';
+    if (status === 'limit_waiting') {
+      const mins = c && c.limitUntil ? Math.max(0, Math.ceil((c.limitUntil - Date.now()) / 60000)) : 0;
+      text = `限额冷却中：约 ${mins} 分钟后自动继续${err ? `（${err}）` : ''}`;
+      cls += 'warn';
+    } else if (status === 'paused') {
+      text = `已暂停：${err || '点「继续」接着跑'}`;
+      cls += 'warn';
+    } else if (status === 'error') {
+      text = `异常中断：${err || '打开日志看原因'}`;
+      cls += 'bad';
+    }
+    if (!text) {
+      el.hidden = true;
+      el.textContent = '';
+      return;
+    }
+    el.className = cls;
+    el.textContent = text;
+    el.hidden = false;
+  }
+
   function renderHeader(v) {
     const c = v.current;
     const pill = $('statusPill');
@@ -106,6 +151,7 @@
     if (status === 'error' && c.lastError) label = '异常中断';
     pill.textContent = label;
     pill.title = (c && c.lastError) || '';
+    renderNotice(c, status);
 
     const running = (v.batches || []).filter((b) => b.status === 'running').length;
     if (!c) {

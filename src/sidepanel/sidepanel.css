@@ -114,10 +114,35 @@ body {
   border-color: #f7cccc;
 }
 
+/* 自动暂停/异常中断的可见原因条：以前只写进状态胶囊的 title，用户看不到就以为「自己停了」 */
+.hdr-notice {
+  flex: 0 0 auto;
+  margin: 8px 12px 0;
+  padding: 7px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  border: 1px solid var(--border);
+  background: var(--bg-soft);
+  color: var(--text-soft);
+  word-break: break-word;
+}
+
+.hdr-notice.warn {
+  background: var(--warn-soft);
+  border-color: #f3e0bd;
+  color: #8a5a00;
+}
+
+.hdr-notice.bad {
+  background: var(--danger-soft);
+  border-color: #f7cccc;
+  color: #a8071a;
+}
+
 .hdr-right {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  align-items: center;  gap: 8px;
   flex: 0 0 auto;
 }
 

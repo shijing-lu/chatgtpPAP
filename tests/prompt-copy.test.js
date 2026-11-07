@@ -133,8 +133,52 @@ async function clipboardTests() {
   else delete globalThis.navigator;
 }
 
+/* ---------- C. 存储兜底（后台旧版本不认 GET_PROMPTS 时） ---------- */
+async function storageTests() {
+  const mem = {
+    'item:b1:0': { index: 0, prompt: LONG },
+    'item:b1:1': { index: 1, prompt: '第二条' },
+    'item:b2:0': { index: 0, prompt: '另一个批次' },
+    'img:abc': { dataUrl: 'data:image/png;base64,AAAA' }
+  };
+  const calls = [];
+  const storage = {
+    get: (keys) => {
+      calls.push(keys);
+      const out = {};
+      for (const k of keys) if (k in mem) out[k] = mem[k];
+      return Promise.resolve(out);
+    }
+  };
+
+  const all = await PC.readStorage(storage, 'b1', 2, []);
+  assert.strictEqual(all.length, 2, '只取当前批次、只取需要的键');
+  assert.strictEqual(all[0].prompt, LONG, '长提示词必须完整，不能被视图的 240 字截断');
+  assert.strictEqual(all[1].prompt, '第二条');
+  assert.ok(!calls[0].some((k) => k.startsWith('img:')), '不能把参考图的 dataURL 一起读出来');
+  passed += 1;
+  console.log('  ✓ readStorage() 取当前批次完整原文，不读图片数据');
+
+  const picked = await PC.readStorage(storage, 'b1', 2, [1]);
+  assert.deepStrictEqual(picked.map((x) => x.index), [1]);
+  assert.strictEqual(picked[0].prompt, '第二条');
+  passed += 1;
+  console.log('  ✓ readStorage() 只取选中条目');
+
+  assert.deepStrictEqual(await PC.readStorage(storage, 'b1', 0, []), []);
+  assert.deepStrictEqual(await PC.readStorage(null, 'b1', 2, []), []);
+  assert.deepStrictEqual(
+    await PC.readStorage({ get: () => Promise.reject(new Error('boom')) }, 'b1', 2, []),
+    [],
+    'storage 异常时返回空数组，不能让复制按钮抛异常'
+  );
+  passed += 1;
+  console.log('  ✓ readStorage() 空批次/无 storage/读取异常都安全返回');
+}
+
 async function main() {
   await clipboardTests();
+  await storageTests();
   console.log(`\nALL PASS — 队列提示词复制回归通过（${passed} 组）`);
 }
 
