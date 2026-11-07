@@ -196,14 +196,38 @@ const logsText = () => store.getLogs().map((l) => l.message).join('\n');
   const zombieA = addTab('https://chatgpt.com/', false);
   const hereA = addTab('https://chatgpt.com/', true);
   const bidA = await newBatch('操作系统第12', 2);
-  await markRunning(bidA, 30000);
+  await markRunning(bidA, 120000);
   await bindOnly(bidA, zombieA.id);
   const grantA = await orch.claim(hereA.id, 'conv-a');
-  assert.strictEqual(grantA.ok, true, '执行页 30 秒没来领任务，当前页必须能自动接管');
+  assert.strictEqual(grantA.ok, true, '执行页 2 分钟没有任何页面通信，当前页必须能自动接管');
   assert.strictEqual(store.getRuntime().activeTabs[hereA.id].batchId, bidA);
   assert.ok(!store.getRuntime().activeTabs[zombieA.id], '旧僵尸绑定必须清掉，否则会变成两个执行页');
-  assert.match(logsText(), /没来领任务.*接管/);
+  assert.match(logsText(), /没有任何页面通信.*接管/);
   ok('A: 僵尸执行页超时后由当前标签页自动接管');
+
+  /* A2：一条任务跑了 4 分钟，但执行页一直在心跳/上报 —— 绝不能判成僵尸。
+   * 用户日志里 #34 跑完 215 秒就被夺权，随后另一个标签页重发前提、整条链断掉。 */
+  await reset();
+  const execA2 = addTab('https://chatgpt.com/', false);
+  const watcherA2 = addTab('https://chatgpt.com/', true);
+  const bidA2 = await newBatch('长任务刚结束', 2);
+  await markRunning(bidA2, 240000);
+  await store.withLock(async () => {
+    const b = store.getBatch(bidA2);
+    b.lastClaimAt = Date.now() - 240000;
+    b.lastPageAt = Date.now() - 3000; // 3 秒前刚上报过结果/心跳
+    await store.putBatch(b);
+    const done = store.getItem(bidA2, 0);
+    done.status = S.NEEDS_REVIEW;
+    await store.putItem(bidA2, done);
+  });
+  await bindOnly(bidA2, execA2.id);
+  const grantA2 = await orch.claim(watcherA2.id, 'conv-a2');
+  assert.strictEqual(grantA2.ok, false, '4 分钟没领新任务但页面一直在通信，不得被抢走执行权');
+  assert.strictEqual(grantA2.reason, 'no-batch');
+  assert.strictEqual(store.getRuntime().activeTabs[execA2.id].batchId, bidA2);
+  assert.ok(!logsText().includes('改由当前标签页'), '不应出现夺权日志');
+  ok('A2: 长任务刚结束、页面仍在通信时不误判僵尸');
 
   /* B：刚点开始不久，不抢执行权 */
   await reset();
@@ -264,7 +288,7 @@ const logsText = () => store.getLogs().map((l) => l.message).join('\n');
   const zombieF = addTab('https://chatgpt.com/', false);
   const hereF = addTab('https://chatgpt.com/', true);
   const bidF = await newBatch('不并发', 2);
-  await markRunning(bidF, 30000);
+  await markRunning(bidF, 120000);
   await bindOnly(bidF, zombieF.id);
   const firstF = await orch.claim(hereF.id, 'conv-f1');
   assert.strictEqual(firstF.ok, true);
@@ -318,7 +342,7 @@ const logsText = () => store.getLogs().map((l) => l.message).join('\n');
   const zombieJ = addTab('https://chatgpt.com/', false);
   const hereJ = addTab('https://chatgpt.com/', true);
   const bidJ = await newBatch('立即修复', 1);
-  await markRunning(bidJ, 30000);
+  await markRunning(bidJ, 120000);
   await bindOnly(bidJ, zombieJ.id);
   const fixJ = await global.handleCommand({ cmd: CGR.CMD.FIX_TABS, payload: { batchId: bidJ } });
   assert.strictEqual(fixJ.ok, true);

@@ -366,6 +366,24 @@
     }
   }
 
+  /** 页面实况：后台 PING 时顺带带回，用于分辨「脚本还活着」和「这一页真的是对话页」。
+   * 停在登录页/错误页/加载中的标签页同样能回 PING，但没有输入框也没有消息节点。 */
+  function pageStatus() {
+    let hasComposer = false;
+    let msgCount = 0;
+    try {
+      hasComposer = !!composer.getComposer();
+    } catch (e) {}
+    try {
+      msgCount = CGR.pickAll(CGR.SEL.allMsg || []).length;
+    } catch (e) {}
+    let ready = '';
+    try {
+      ready = document.readyState;
+    } catch (e) {}
+    return { hasComposer, msgCount, ready };
+  }
+
   /** 循环体的一次迭代；用 return 代替 continue，异常由外层兜住 */
   async function loopOnce() {
     touchLoop('idle');
@@ -382,6 +400,14 @@
           type: MSG.LOG,
           level: 'warn',
           message: `当前页面找不到输入框（第 ${noComposerHits} 次），任务无法开始。请确认停在 ${CGR.currentSiteLabel()} 的对话页，必要时刷新页面`
+        });
+        // 让后台知道「这一页不是可用对话页」，别把它当成健康执行页一直等下去
+        send({
+          type: MSG.PAGE_NOT_READY,
+          site: typeof CGR.currentSiteId === 'function' ? CGR.currentSiteId() : '',
+          url: location.href,
+          page: pageStatus(),
+          hits: noComposerHits
         });
       }
       await waitForWork(4000);
@@ -403,7 +429,10 @@
     if (!grant || !grant.ok) {
       const reason = (grant && grant.reason) || 'no-response';
       const now = Date.now();
-      if (reason !== lastIdleReason || now - lastIdleLogAt > 30000) {
+      // 旁观标签页每 3~8 秒就来领一次任务，30 秒一条会把真正有用的日志冲掉。
+      // 这条纯状态噪音降到 2 分钟一次，其它状态变化仍按 30 秒。
+      const logGap = reason === 'no-batch' ? 120000 : 30000;
+      if (reason !== lastIdleReason || now - lastIdleLogAt > logGap) {
         lastIdleReason = reason;
         lastIdleLogAt = now;
         const label = {
@@ -413,12 +442,12 @@
           error: '批次处于异常状态，需要处理',
           'limit_waiting': '限额冷却中',
           finished: '批次已完成',
-          'no-batch': '这个标签页不是执行页（执行页长时间没来领任务时会自动接管）',
+          'no-batch': '这是旁观标签页，批次在另一个标签页执行（本页不用操作；执行页失联时会自动接管）',
           'site-mismatch': '这个标签页的站点与批次绑定的站点不一致，请在批次设置里改「工作站点」',
           'conv-conflict': '与另一个标签页抢同一个对话',
           'no-response': '后台无响应（扩展可能正在重启）'
         }[reason] || reason;
-        const extra = reason === 'no-batch' && grant && grant.activeBatch ? `（「${grant.activeBatch}」当前绑定在另一个标签页）` : '';
+        const extra = reason === 'no-batch' && grant && grant.activeBatch ? `（「${grant.activeBatch}」正在那个标签页执行）` : '';
         send({ type: MSG.LOG, level: 'info', message: `等待派发：${label}${extra}` });
       }
       await waitForWork(idleWait);
@@ -469,6 +498,31 @@
     return '';
   }
 
+  /** 大图直接在页面里用 blob: + <a download> 下载。
+   * Chrome 对 data: 下载 URL 有长度限制，4K PNG 转 base64 很容易超限导致
+   * 「下载失败」；blob 点击是浏览器原生路径，同源带 cookie、没有大小限制。
+   * 名字和目录仍由后台的 onDeterminingFilename 归位，这里只保证不被默认命名。 */
+  function blobClick(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = String(filename || '').split('/').pop() || 'image.png';
+    a.target = '_self';
+    a.style.display = 'none';
+    (document.body || document.documentElement).appendChild(a);
+    a.click();
+    // 立刻 revoke 会让部分 Chrome 版本取消下载，留足时间再释放
+    setTimeout(() => {
+      try {
+        a.remove();
+      } catch (e) {}
+      try {
+        URL.revokeObjectURL(url);
+      } catch (e) {}
+    }, 60000);
+    return true;
+  }
+
   /** 让 ChatGPT 自己下载附件文件。绝不点「查看原图」这类 http 外链：
    * 那会在当前页导航或开新标签页，用户明确不允许。sandbox: / 卡片按钮才走这里。
    * filename 是批次目录/命名模板算好的目标名：即使后台归位监听器失效，
@@ -507,6 +561,28 @@
         if (res.ok === false) throw new Error(`http-${res.status}`);
         const blob = await res.blob();
         mime = blob.type || mime;
+
+        // 大图别拼 data URL：Chrome 对 data: 下载 URL 有长度上限，
+        // 4K PNG 走这条路经常直接失败。先用消息让后台登记归位目标再点 blob。
+        const approxB64 = Math.ceil((blob.size || 0) * 4 / 3);
+        if (approxB64 > (CGR.LIMITS.maxDataUrlB64 || 12000000)) {
+          const ack = await send({
+            type: MSG.DL_BLOB_CLICK,
+            index,
+            batchId,
+            ext: CGR.extFromUrl('', mime),
+            size: blob.size || 0
+          });
+          if (ack && ack.ok) {
+            blobClick(blob, ack.filename);
+            send({
+              type: MSG.LOG,
+              level: 'info',
+              message: `#${index + 1} 图片较大（${Math.round((blob.size || 0) / 1024 / 1024 * 10) / 10} MB），已改用页面原生下载，不拼 data URL；由后台归位到批次目录`
+            });
+            return;
+          }
+        }
         dataUrl = await blobToDataUrl(blob);
       } catch (e) {
         if (detail.click && clickAttachment(src, detail.label, detail.filename)) {
@@ -535,6 +611,7 @@
           data: b64.slice(i * CHUNK, (i + 1) * CHUNK)
         });
       }
+      // 完整性由后台 commitChunks 校验：丢一片就标待确认，绝不保存损坏文件
       await send({
         type: MSG.DL_COMMIT,
         index,
@@ -543,7 +620,11 @@
         ext: CGR.extFromUrl('', mime)
       });
     } catch (e) {
-      send({ type: MSG.LOG, level: 'error', message: `页面内取流失败：${String((e && e.message) || e)}` });
+      const reason = String((e && e.message) || e);
+      send({ type: MSG.LOG, level: 'error', message: `页面内取流失败：${reason}` });
+      // 以前只写一条日志就结束，后台任务会永远挂在「下载中」并拖住整批队列。
+      // 现在立刻告诉后台收敛为「待确认」，绝不重发提示词。
+      send({ type: MSG.DL_FETCH_FAILED, index, batchId, reason });
     }
   }
 
@@ -596,7 +677,7 @@
         // 后台每 30 秒必发一次：既打断空闲等待，也顺带做一次主循环看门狗检查
         ensureLoopAlive();
         pokeIdle();
-        sendResponse({ ok: true, ts: Date.now(), loop: loopStatus() });
+        sendResponse({ ok: true, ts: Date.now(), loop: loopStatus(), page: pageStatus() });
         return false;
       case MSG.WAKE:
         ensureLoopAlive();

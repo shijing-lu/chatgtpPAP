@@ -311,8 +311,22 @@
     item.status = CGR.STATUS.DOWNLOADING;
     item.lease = null;
     await store.putItem(item.batchId, item);
-    store.addLog('info', `#${item.index + 1} 文件附件产物，已准备下载并归位到 ${filename}`, { index: item.index });
+    store.addLog('info', `#${item.index + 1} 已登记下载归位目标 → ${filename}`, { index: item.index });
     return pendingClick;
+  }
+
+  /** 大图走页面 blob 点击时，先由后台把目标路径登记好再让页面点，
+   * 否则 onDeterminingFilename 没有 pendingClick，文件又会变成默认名落到下载根目录。 */
+  async function armBlobClick(bid, index, ext) {
+    const item = store.getItem(bid, index);
+    if (!item) return { ok: false, error: 'item-not-found' };
+    const pending = await armClick(item, ext || artifactExt(item.image || {}), item.image || {});
+    item.download = Object.assign({}, item.download, {
+      tier: 'B', state: 'clicking', filename: pending.filename,
+      startedAt: Date.now(), tabId: item.tabId != null ? item.tabId : null
+    });
+    await store.putItem(bid, item);
+    return { ok: true, filename: pending.filename };
   }
 
   /** 点击后没产生下载时别把任务永远挂在「下载中」。由后台周期检查调用。 */
@@ -413,8 +427,15 @@
     const filename = assignFilename(item, ext);
     const intent = await armIntent(item, filename, url, 'extension');
     item.status = CGR.STATUS.DOWNLOADING;
-    item.lease = null; // 进入下载阶段后不再需要租约，避免被过期清扫误判
-    item.download = { tier: 'A', state: 'pending', filename, url: String(url).slice(0, 2048) };
+    // 只清租约（DOWNLOADING 不该被 lease 过期清扫误判），绝不能清 tabId：
+    // A 级直链被服务端拒绝时，降级取流必须还能找到当初那个页面。
+    item.lease = null;
+    item.download = {
+      tier: 'A', state: 'pending', filename,
+      url: String(url).slice(0, 2048),
+      tabId: item.tabId != null ? item.tabId : null,
+      startedAt: Date.now()
+    };
 
     let dlId;
     try {
@@ -474,22 +495,43 @@
     return item;
   }
 
+  /** 找执行页：A 级降级时租约已被清掉，必须从 item / download / runtime 三处兜底。
+   * 以前只认 item.tabId，而 A 级分支从来不写它 —— 直链一旦被拒，降级必然
+   * NO_TAB_FOR_FALLBACK，页面上明明有图却判「下载失败」。 */
+  function resolveTabId(item) {
+    if (item.tabId != null) return item.tabId;
+    if (item.lease && item.lease.tabId != null) return item.lease.tabId;
+    if (item.download && item.download.tabId != null) return item.download.tabId;
+    const rt = typeof store.getRuntime === 'function' ? store.getRuntime() : null;
+    const ids = Object.entries((rt && rt.activeTabs) || {})
+      .filter(([, v]) => v && v.batchId === item.batchId && !v.stale)
+      .map(([k]) => Number(k));
+    return ids.length ? ids[0] : null;
+  }
+
   /** 让内容脚本在页面内取流（blob: / sandbox: / 直链 401 / 附件卡片） */
   async function requestFallback(item, reason, opts) {
     const detail = opts || {};
     const img = item.image || {};
-    const tabId = item.tabId || (item.lease && item.lease.tabId);
+    const tabId = resolveTabId(item);
     const needClick = !!(detail.click || img.click || img.artifactKind === 'card');
     if (needClick && !pendingClick) {
       await armClick(item, artifactExt({ src: img.src, label: detail.label || img.label }), img);
     }
-    item.download = Object.assign({}, item.download, { tier: 'B', state: 'fetching' });
+    item.tabId = tabId;
+    item.download = Object.assign({}, item.download, {
+      tier: 'B', state: 'fetching', tabId, startedAt: Date.now()
+    });
     await store.putItem(item.batchId, item);
     store.addLog('warn', `#${item.index + 1} 转用页面内取流（${reason}）${needClick ? '，取流失败将点击附件下载' : ''}`);
-    if (!tabId) {
+    if (tabId == null) {
       item.status = CGR.STATUS.NEEDS_REVIEW;
-      item.error = { code: 'NO_TAB_FOR_FALLBACK', message: '图片已生成但无法找到取流标签页' };
+      item.error = {
+        code: 'NO_TAB_FOR_FALLBACK',
+        message: '图片已生成但找不到可保存的执行页；请回到该标签页手动保存，本条不会重发提示词'
+      };
       await store.putItem(item.batchId, item);
+      store.addLog('error', `#${item.index + 1} 找不到执行页，图片仍在页面上，可手动保存`);
       return;
     }
     try {
@@ -536,13 +578,83 @@
     const buf = chunkBuf.get(key);
     chunkBuf.delete(key);
     if (!buf) return null;
+    // 分片经 sendMessage 逐条回传，SW 冷启动/消息超时都可能丢一片。
+    // 以前缺片也照样 join 出去，结果是一个「下载成功」但打不开的损坏文件。
+    const intact = buf.total > 0 && buf.received === buf.total &&
+      buf.parts.every((p) => typeof p === 'string' && p.length > 0);
+    const item = store.getItem(bid, index);
+    if (!intact) {
+      store.addLog('error', `#${index + 1} 图片分片不完整（${buf.received}/${buf.total}），已放弃本次下载，避免保存损坏文件`);
+      if (item) {
+        item.status = CGR.STATUS.NEEDS_REVIEW;
+        item.download = Object.assign({}, item.download, { state: 'incomplete' });
+        item.error = {
+          code: 'DL_CHUNK_INCOMPLETE',
+          message: '图片数据回传不完整，未保存损坏文件；图片仍在页面上，请手动保存，本条不会重发提示词'
+        };
+        await store.putItem(bid, item);
+      }
+      return null;
+    }
     const b64 = buf.parts.join('');
     const type = mime || 'image/png';
     const dataUrl = `data:${type};base64,${b64}`;
-    const item = store.getItem(bid, index);
     if (!item) return null;
     item.image = Object.assign({}, item.image, { kind: 'data', src: '' });
     return startDataDownload(item, dataUrl, ext || CGR.extFromUrl('', type));
+  }
+
+  /** 页面侧明确报告「取流失败」时立刻收敛，不必等看门狗 */
+  async function failFetch(bid, index, reason) {
+    const item = store.getItem(bid, index);
+    if (!item || item.status === CGR.STATUS.DONE) return false;
+    chunkBuf.delete(chunkKey(bid, index));
+    item.status = CGR.STATUS.NEEDS_REVIEW;
+    item.download = Object.assign({}, item.download, { state: 'failed' });
+    item.error = {
+      code: 'FETCH_FAILED',
+      message: `图片已生成但页面内取流失败（${String(reason || 'unknown').slice(0, 60)}）；请在该标签页手动保存，本条不会重发提示词`
+    };
+    await store.putItem(bid, item);
+    store.addLog('error', `#${index + 1} 页面内取流失败（${String(reason || 'unknown').slice(0, 60)}），图片仍在页面上，可手动保存`);
+    return true;
+  }
+
+  /** DOWNLOADING 阶段刻意没有租约，sweepExpired 管不到；取流失败/丢分片时
+   * 不能让任务永远挂在 ACTIVE 上，否则整批队列都被这一条拖死。 */
+  async function checkPendingFetches() {
+    const ttl = CGR.LIMITS.fetchTimeoutMs || 60000;
+    const now = Date.now();
+    for (const b of store.listBatches()) {
+      for (const item of store.getItems(b.id)) {
+        if (item.status !== CGR.STATUS.DOWNLOADING) continue;
+        const d = item.download || {};
+        if (d.state !== 'fetching' && d.state !== 'clicking') continue;
+        if (!d.startedAt || now - d.startedAt < ttl) continue;
+        chunkBuf.delete(chunkKey(b.id, item.index));
+        item.status = CGR.STATUS.NEEDS_REVIEW;
+        item.download = Object.assign({}, d, { state: 'timeout' });
+        item.error = {
+          code: 'FETCH_TIMEOUT',
+          message: '图片已生成但保存超时，请在该标签页手动保存；本条不会重发提示词'
+        };
+        await store.putItem(b.id, item);
+        store.addLog('error', `#${item.index + 1} 保存环节超时（${Math.round(ttl / 1000)} 秒无结果），已标记待确认，队列继续下一条`);
+      }
+    }
+  }
+
+  /** 下载一旦有终态，清掉同条目的点击意图，免得 45 秒看门狗再补一条误报 */
+  async function clearPendingClickFor(bid, index) {
+    if (!pendingClick || pendingClick.batchId !== bid || pendingClick.index !== index) return;
+    const key = pendingClick.intentKey;
+    pendingClick = null;
+    try {
+      await chrome.storage.local.remove(PENDING_KEY);
+    } catch (e) {
+      /* ignore */
+    }
+    await dropIntent(key);
   }
 
   /** 下载完成/中断事件。必须在 withLock 内执行 */
@@ -568,6 +680,7 @@
 
     await chrome.storage.local.remove(`dl:${id}`);
     dlIndex.delete(id);
+    await clearPendingClickFor(bid, index);
 
     if (state === 'complete') {
       // 落盘路径自检：Chrome 若又忽略 filename（例如装了别的下载管理扩展），
@@ -616,8 +729,11 @@
     startFileDownload,
     startSiteDownload,
     requestFallback,
+    armBlobClick,
+    failFetch,
     onDeterminingFilename,
     checkPendingClicks,
+    checkPendingFetches,
     restore,
     pushChunk,
     commitChunks,

@@ -71,6 +71,10 @@
     LOG: 'LOG',
     DL_CHUNK: 'DL_CHUNK',
     DL_COMMIT: 'DL_COMMIT',
+    // 页面内取流的三种收敛信号：大图改走页面 blob 点击、取流失败、页面不是对话页
+    DL_BLOB_CLICK: 'DL_BLOB_CLICK',
+    DL_FETCH_FAILED: 'DL_FETCH_FAILED',
+    PAGE_NOT_READY: 'PAGE_NOT_READY',
     SELFCHECK: 'SELFCHECK',
     SNAPSHOT: 'SNAPSHOT',
     // 后台 -> 内容：点当前站点的「下载全尺寸图片」按钮（Gemini）
@@ -161,6 +165,13 @@
     // 主循环活性判据：空闲阶段的迭代超过这么久没推进一次，就认定它停摆。
     // lease 阶段（正在等出图）不算，正常生图本来就可能几分钟。
     loopStallMs: 90000,
+    // 页面内取流看门狗。DOWNLOADING 阶段刻意清掉了租约（避免被过期清扫误判），
+    // 所以 sweepExpired 管不到它；取流失败/丢分片时必须由这个超时把任务收敛为「待确认」，
+    // 否则 DOWNLOADING 一直算 ACTIVE，整批队列会被一条下载卡死。
+    fetchTimeoutMs: 60000,
+    // base64 超过这个长度就别再拼 data URL 了：Chrome 对 data: 下载 URL 有长度限制，
+    // 4K PNG 很容易踩到。改在页面里用 blob: + <a download> 点击，交给归位监听器改名。
+    maxDataUrlB64: 12000000,
     // 空闲轮询：短周期且封顶。以前从 15 秒指数退避到 120 秒，
     // 一旦 SW 被回收丢一条消息，就会「越卡越久」，同时让 SW 更容易被回收。
     idlePollMs: 3000,
@@ -168,10 +179,11 @@
     // service worker 运行期唤醒检查间隔；只在批次确实卡住时才发 WAKE
     wakeTickMs: 5000,
     wakeStuckMs: 15000,
-    // 执行页「占着绑定却不来领任务」的判定：超过这么久没有成功派发、也没有任务在执行，
-    // 就允许其它正在轮询的 ChatGPT 标签页就地接管。实际阈值还会按配置的间隔上限放宽，
-    // 避免把两条任务之间的正常等待误判成失联。
-    claimTakeoverMs: 10000,
+    // 执行页「占着绑定却不来领任务」的判定：超过这么久没有任何页面通信、也没有任务在执行，
+    // 才允许其它正在轮询的标签页就地接管。判据是最近一次心跳/进度/结果/领取请求
+    // （b.lastPageAt），不是 lastClaimAt —— 一条任务要跑几分钟，期间本来就不会领新任务。
+    // 后台标签页心跳 20 秒一次，取 30 秒既能容下节流抖动，又不会让真失联等太久。
+    claimTakeoverMs: 30000,
     maxLogs: 400
   };
 

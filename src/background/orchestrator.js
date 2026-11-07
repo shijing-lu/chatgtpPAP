@@ -636,7 +636,11 @@
             CGR.LIMITS.claimTakeoverMs,
             (cfgNow.maxDelayMs || 7000) + CGR.LIMITS.idlePollMs
           );
-          const quietFor = Date.now() - (target.lastClaimAt || target.startedAt || 0);
+          // 用「最近一次页面通信」而不是「最近一次领到任务」。一条任务包含
+          // 前提等回复(60s)+等出图(120s+)，期间不会领新任务，用 lastClaimAt
+          // 必然把正在干活的执行页算成失联。
+          const activityAt = Math.max(target.lastPageAt || 0, target.lastClaimAt || 0, target.startedAt || 0);
+          const quietFor = Date.now() - activityAt;
           const zombie = live.length > 0 && !hasActive && quietFor > takeoverMs;
 
           if (!live.length || zombie) {
@@ -649,7 +653,7 @@
             await store.setRuntime({ activeTabs });
             bid = target.id;
             store.addLog('info', zombie
-              ? `执行页 ${bound.map(([tid]) => tid).join(', ')} 已 ${Math.round(quietFor / 1000)} 秒没来领任务，改由当前标签页 ${tabId} 接管${batchLabel(target)}（旧绑定已清除）`
+              ? `执行页 ${bound.map(([tid]) => tid).join(', ')} 已 ${Math.round(quietFor / 1000)} 秒没有任何页面通信，改由当前标签页 ${tabId} 接管${batchLabel(target)}（旧绑定已清除）`
               : `标签页 ${tabId} 未登记（原有绑定已失联），已自动归到${batchLabel(target)}继续执行`);
           }
         }
@@ -666,6 +670,8 @@
 
       const b = store.getBatch(bid);
       if (!b) return { ok: false, reason: 'no-batch' };
+      // 来领任务本身就证明这一页活着（哪怕这次没领到任务）
+      await touchBatch(bid);
       if (b.status !== G.RUNNING) return { ok: false, reason: b.status };
 
       const cfg = store.getCfg();
@@ -716,6 +722,7 @@
       await store.setRuntime({ activeTabs });
 
       b.lastClaimAt = Date.now();
+      b.lastPageAt = Date.now();
       if (b.singleShot) {
         b.singleShot = false;
         b.status = G.PAUSED;
@@ -904,6 +911,8 @@
       const cfg = store.getCfg();
       const status = msg.status;
       const data = msg.data || {};
+      // 刚上报结果的执行页当然是活的：不记下来就会被紧接着的领取请求误判成僵尸
+      await touchBatch(bid);
 
       if (status === 'LIMIT') {
         await handleLimit(item, data.raw);
@@ -955,6 +964,12 @@
           siteDownload: !!best.siteDownload
         };
         item.ts = Object.assign({}, item.ts, { imageAt: Date.now() });
+        // 所有下载分支都要留下执行页：A 级直链被拒时会降级到页面内取流，
+        // 没有 tabId 就只能判「下载失败」，页面上的图白白丢掉。
+        if (senderTabId != null) {
+          item.tabId = senderTabId;
+          await store.putItem(bid, item);
+        }
         sendFailStreak = 0;
         const okBatch = store.getBatch(bid);
         if (okBatch && okBatch.premiseFailStreak) {
@@ -1134,9 +1149,23 @@
 
   /* ---------------- 心跳 / 单条操作 ---------------- */
 
+  /** 记下「这个批次的执行页刚刚还在和后台说话」。
+   * 以前只有 lastClaimAt（成功领到任务才更新），一条任务跑 3~5 分钟时它会一直
+   * 停在领取时刻；任务一结束、旁观页来领任务，就把刚跑完的执行页判成
+   * 「200 多秒没来领任务」的僵尸并夺权，前提在另一个标签页重发、图片全丢。
+   * 心跳 / 进度 / 结果 / 领取请求都算真实活跃，不能用「领到任务」代替。 */
+  async function touchBatch(bid) {
+    if (!bid) return;
+    const b = store.getBatch(bid);
+    if (!b) return;
+    b.lastPageAt = Date.now();
+    await store.putBatch(b);
+  }
+
   async function heartbeat(token) {
     return store.withLock(async () => {
       const it = await lease.renewByToken(token);
+      if (it) await touchBatch(it.batchId);
       return { ok: !!it };
     });
   }
@@ -1156,6 +1185,7 @@
         item.lease.expiresAt = Date.now() + CGR.LIMITS.leaseTtlMs;
       }
       await store.putItem(item.batchId, item);
+      await touchBatch(item.batchId);
       return { ok: true };
     });
   }

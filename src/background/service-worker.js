@@ -73,6 +73,7 @@ noteVersion(null); // SW 每次唤醒都兜底检查一次；同版本不写盘
 let wakeTimer = 0;
 const wakeRebindAt = new Map();
 const wakeScanAt = new Map();
+const pageNotReadyAt = new Map();
 
 /**
  * 每 5 秒看一眼：某个批次有待办、没有任务在跑、又超过 15 秒没派发过，
@@ -81,9 +82,13 @@ const wakeScanAt = new Map();
  */
 async function wakeTick() {
   await store.ensureLoaded();
-  // 附件点击后若一直没产生下载，别让任务永远挂在「下载中」
+  // 附件点击 / 页面内取流后若一直没结果，别让任务永远挂在「下载中」。
+  // DOWNLOADING 属于 ACTIVE，一条卡住就会让整批队列看起来「还在跑」却不再派发。
   try {
-    await store.withLock(() => dl.checkPendingClicks());
+    await store.withLock(async () => {
+      await dl.checkPendingClicks();
+      await dl.checkPendingFetches();
+    });
   } catch (e) {
     /* ignore */
   }
@@ -96,7 +101,7 @@ async function wakeTick() {
     if (!hasPending && !hasActive) continue;
 
     // 正常的两条任务之间的间隔不打扰，只兜「确实卡住」的情况
-    const quietFor = Date.now() - (b.lastClaimAt || b.startedAt || 0);
+    const quietFor = Date.now() - Math.max(b.lastPageAt || 0, b.lastClaimAt || 0, b.startedAt || 0);
 
     // 有任务一直挂在「执行中」，多半是页面主循环停了、只剩僵尸心跳在替它续租。
     // 定时扫描会识别 loop. stalled 并强制重注入，这里提前触发一次，不用干等 30 秒 alarm。
@@ -265,6 +270,28 @@ async function handleContent(msg, sender) {
     case CGR.MSG.DL_COMMIT: {
       const res = await store.withLock(() => dl.commitChunks(msg.batchId, msg.index, msg.mime, msg.ext));
       return { ok: !!res };
+    }
+    // 大图在页面里用 blob: 点击下载前，先把目标目录/文件名登记好
+    case CGR.MSG.DL_BLOB_CLICK:
+      return store.withLock(() => dl.armBlobClick(msg.batchId, msg.index, msg.ext));
+    // 页面取流明确失败：立即收敛，别让任务永远挂在「下载中」
+    case CGR.MSG.DL_FETCH_FAILED: {
+      await store.withLock(() => dl.failFetch(msg.batchId, msg.index, msg.reason));
+      return { ok: true };
+    }
+    case CGR.MSG.PAGE_NOT_READY: {
+      const tabId = sender.tab ? sender.tab.id : null;
+      const last = pageNotReadyAt.get(tabId) || 0;
+      if (Date.now() - last > 60000) {
+        pageNotReadyAt.set(tabId, Date.now());
+        const site = typeof CGR.siteLabel === 'function' ? CGR.siteLabel(msg.site) : '对话站点';
+        store.addLog(
+          'warn',
+          `标签页 ${tabId} 不是可用的${site}对话页（找不到输入框，消息节点 ${(msg.page && msg.page.msgCount) || 0}）；请切回对话页或刷新。执行页失联时其它标签页会自动接管`,
+          { tabId }
+        );
+      }
+      return { ok: true };
     }
     default:
       return { ok: false, error: 'unknown-message' };

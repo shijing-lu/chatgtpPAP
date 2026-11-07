@@ -145,7 +145,7 @@
         const items = store.getItems(b.id);
         const anyActive = items.some((it) => lease.ACTIVE.includes(it.status));
         const anyPending = items.some((it) => it.status === S.PENDING);
-        const idleFor = Date.now() - (b.lastClaimAt || b.startedAt || Date.now());
+        const idleFor = Date.now() - Math.max(b.lastPageAt || 0, b.lastClaimAt || 0, b.startedAt || Date.now());
         if (anyActive || !anyPending || idleFor < 20000) continue;
         if (Date.now() - (healAt.get(b.id) || 0) < 25000) continue;
         healAt.set(b.id, Date.now());

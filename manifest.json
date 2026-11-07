@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "批量生图助手 · ChatGPT / Gemini",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "把一批提示词交给 ChatGPT 或 Gemini 官网逐条生图，自动检测完成并下载到指定文件夹。",
   "minimum_chrome_version": "114",
   "permissions": ["storage", "unlimitedStorage", "downloads", "tabs", "alarms", "sidePanel", "scripting"],
