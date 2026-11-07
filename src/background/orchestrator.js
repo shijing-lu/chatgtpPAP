@@ -990,6 +990,22 @@
         return { ok: true };
       }
 
+      // 页面与服务端脱节：服务端很可能已经出图（手机端能看到就属此类），
+      // 但这一页的 SSE / 渲染没跟上。此时重发提示词等于再消耗一次生图额度，
+      // 必须直接标待确认，并让队列继续跑下一条，而不是把整批拖到总超时。
+      if (status === 'PAGE_STALE') {
+        logDiagnostic(item, data.diagnostic, 'PAGE_STALE');
+        await finalize(item, S.NEEDS_REVIEW, {
+          error: {
+            code: 'PAGE_STALE',
+            message: '页面长时间无更新，服务端可能已出图；请刷新标签页确认，本条不会重发提示词'
+          }
+        });
+        await bumpStat(bid, 'needsReview');
+        store.addLog('warn', `#${item.index + 1} 页面与服务端脱节（${data.phase || 'dom-frozen'}）：已标记待确认，绝不重发提示词；刷新该标签页通常就能看到图，队列继续下一条`);
+        return { ok: true };
+      }
+
       if (status === 'NO_IMAGE') {
         logDiagnostic(item, data.diagnostic, 'NO_IMAGE');
         const d = data.diagnostic || {};

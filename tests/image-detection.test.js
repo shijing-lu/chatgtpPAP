@@ -8,6 +8,8 @@
  *  - stopButton 选择器失效时靠 DOM 静默仍能收敛
  *  - 无关 toast 不再误判成 PAGE_ERROR
  *  - 真没出图时仍要给出带页面实况的 NO_IMAGE
+ *  - 页面与服务端脱节（服务端已出图、这一页卡在生成中）要提前收敛成 PAGE_STALE
+ *  - 页面持续有进展（流式输出）时绝不能误判成 PAGE_STALE
  */
 const fs = require('fs');
 const vm = require('vm');
@@ -269,6 +271,33 @@ async function run() {
   assert.strictEqual(afterFresh.length, 1, '仅签名变化不算新图');
   assert.ok(afterFresh[0].src.includes('new.png'), '真正的新图仍要识别');
   console.log('PASS I: 签名刷新不会把旧图误算成本次结果');
+
+  /* J: 服务端已出图，但这一页卡在「生成中」且内容全无变化 → 提前收敛，不拖到 5 分钟总超时 */
+  reset();
+  stopBtn = {}; // 页面一直显示停止按钮：旧逻辑会每轮刷新 lastActivityAt，看起来「很活跃」
+  assistantNodes = [{ innerText: '正在生成' }];
+  msgNodes = [{}, {}, {}];
+  before = start({ stalePageMs: 60000, timeoutMs: 300000, firstSignalMs: 120000 });
+  const staleRes = await tick(61000);
+  assert.strictEqual(staleRes && staleRes.status, 'PAGE_STALE', '页面脱节必须提前收敛成 PAGE_STALE');
+  assert.strictEqual(staleRes.phase, 'stuck-generating', '要能看出是卡在生成中');
+  console.log('PASS J: 页面卡在生成中且内容不变时提前收敛，不拖到 5 分钟总超时');
+
+  /* K: 慢但有进展的流式生成不能被误判成页面脱节 */
+  reset();
+  stopBtn = {};
+  assistantNodes = [{ innerText: '正在生成' }];
+  msgNodes = [{}, {}, {}];
+  before = start({ stalePageMs: 60000, timeoutMs: 300000, firstSignalMs: 120000 });
+  let misjudged = false;
+  for (let i = 1; i <= 7; i++) {
+    assistantNodes = [{ innerText: '正在生成' + '.'.repeat(i) }];
+    const r = await tick(20000);
+    if (r && r.status === 'PAGE_STALE') misjudged = true;
+  }
+  assert.strictEqual(misjudged, false, '正文持续变化说明页面活着，绝不能误判成 PAGE_STALE');
+  assert.strictEqual(result, null, '正常慢生成应继续等待，不该被提前结束');
+  console.log('PASS K: 流式输出持续有进展时不误判、不打断正常慢生成');
 }
 
 run()

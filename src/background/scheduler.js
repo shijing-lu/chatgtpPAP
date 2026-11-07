@@ -50,6 +50,20 @@
         try {
           const res = await CGR.withTimeout(tabs.send(id, { type: CGR.MSG.PING }), 5000, null);
           if (res && res.ok) {
+            // PING 通只说明消息监听器还在。页面主循环可能早就卡死/退出了：
+            // 心跳定时器仍会替它续租，wakeTick / 自愈④ / claim 全被「有任务在跑」挡住，
+            // 表现就是「批次显示运行中，却再也不往聊天框发提示词」。
+            const loop = res.loop || null;
+            if (loop && loop.stalled) {
+              misses.delete(id);
+              // tab-dead：已发出提示词、可能已经出图的任务只标待确认，绝不退回队列重发
+              await lease.reclaimByTab(id, 'tab-dead');
+              const rebuilt = await tabs.ensureContentScript(id, { force: true });
+              alive[id] = Object.assign({}, rt.activeTabs[id], { stale: false, at: Date.now() });
+              store.addLog('warn', `标签页 ${id} 主循环停摆（phase=${loop.phase}${loop.contextDead ? '，扩展上下文已失效' : ''}），已强制重建页面连接并回收其租约；已出图的任务只标待确认，不会重发提示词`);
+              if (rebuilt) await CGR.withTimeout(tabs.send(id, { type: CGR.MSG.WAKE }), 5000, null);
+              continue;
+            }
             // 之前被标过 stale 的标签页一旦重新响应，必须清掉标记，
             // 否则它会永久被当成失联执行页（claim 的接管判断也依赖这个标记）。
             alive[id] = Object.assign({}, rt.activeTabs[id], { stale: false });

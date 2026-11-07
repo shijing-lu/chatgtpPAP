@@ -131,15 +131,20 @@
    * 关键场景：扩展重新加载后，已经打开的 ChatGPT 标签页里仍是旧脚本（甚至已失效），
    * 这时后台发什么消息都石沉大海 —— 表现就是「说在跑但页面毫无反应」。
    */
-  async function ensureContentScript(tabId) {
-    if (await ping(tabId)) return true;
+  async function ensureContentScript(tabId, opts) {
+    // force：页面 PING 得通但主循环已经停摆时，必须绕过 ping 短路强制换掉旧实例
+    const force = !!(opts && opts.force);
+    if (!force && (await ping(tabId))) return true;
     try {
       const files = chrome.runtime.getManifest().content_scripts[0].js;
-      // 旧实例可能把 __CGR_LOADED__ 留在页面里，先清掉再注入，否则新脚本会直接 return
+      // 旧实例可能把 __CGR_LOADED__ 留在页面里，先清掉再注入，否则新脚本会直接 return。
+      // 同时递增实例代次：旧实例的 loop / 心跳 / 等待日志定时器仍挂在页面上，
+      // 不主动让它退出，就会和新实例一起领任务、重复发提示词（旧监听器也会抢答 PING）。
       await chrome.scripting.executeScript({
         target: { tabId },
         func: () => {
           window.__CGR_LOADED__ = false;
+          window.__CGR_INSTANCE__ = (Number(window.__CGR_INSTANCE__) || 0) + 1;
         }
       });
       await chrome.scripting.executeScript({ target: { tabId }, files });

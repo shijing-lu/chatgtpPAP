@@ -72,6 +72,7 @@ noteVersion(null); // SW 每次唤醒都兜底检查一次；同版本不写盘
 
 let wakeTimer = 0;
 const wakeRebindAt = new Map();
+const wakeScanAt = new Map();
 
 /**
  * 每 5 秒看一眼：某个批次有待办、没有任务在跑、又超过 15 秒没派发过，
@@ -90,11 +91,23 @@ async function wakeTick() {
   for (const b of store.listBatches()) {
     if (b.status !== G.RUNNING) continue;
     const items = store.getItems(b.id);
-    if (!items.some((it) => it.status === S.PENDING)) continue;
-    if (items.some((it) => lease.ACTIVE.includes(it.status))) continue;
+    const hasPending = items.some((it) => it.status === S.PENDING);
+    const hasActive = items.some((it) => lease.ACTIVE.includes(it.status));
+    if (!hasPending && !hasActive) continue;
 
     // 正常的两条任务之间的间隔不打扰，只兜「确实卡住」的情况
     const quietFor = Date.now() - (b.lastClaimAt || b.startedAt || 0);
+
+    // 有任务一直挂在「执行中」，多半是页面主循环停了、只剩僵尸心跳在替它续租。
+    // 定时扫描会识别 loop. stalled 并强制重注入，这里提前触发一次，不用干等 30 秒 alarm。
+    if (hasActive && quietFor >= (CGR.LIMITS.loopStallMs || 90000)) {
+      if (Date.now() - (wakeScanAt.get(b.id) || 0) < 30000) continue;
+      wakeScanAt.set(b.id, Date.now());
+      sched.scan().catch(() => {});
+      continue;
+    }
+
+    if (!hasPending || hasActive) continue;
     if (quietFor < CGR.LIMITS.wakeStuckMs) continue;
 
     const ids = Object.entries(rt.activeTabs || {})
@@ -428,8 +441,9 @@ async function handleCommand(msg) {
       return { ok: true, fixed, rebound: rebind };
     }
     case CGR.CMD.RESET: {
-      // 清掉唤醒节留，避免重置后旧的重绑时间戳继续影响自愈
+      // 清掉唤醒节留，避免重置后旧的重绑/扫描时间戳继续影响自愈
       wakeRebindAt.clear();
+      wakeScanAt.clear();
       const out = await orch.reset({ scope: p.scope });
       // 恢复出厂设置会 storage.local.clear()。版本记录不是用户数据，重建一条，
       // 否则设置页会丢掉「当前版本 / 更新记录」。

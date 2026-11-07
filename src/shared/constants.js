@@ -124,6 +124,10 @@
     maxDelayMs: 7000,
     firstSignalMs: 120000,
     timeoutMs: 300000,
+    // 页面与服务端脱节（SSE 断流 / 标签页被冻结）时，服务端其实已经出图，
+    // 但这一页永远等不到结果。超过这么久「消息数、正文、产物、生成状态」全都没变过，
+    // 就提前收敛成 PAGE_STALE（待确认、绝不重发），别把整个队列拖到 5 分钟总超时。
+    stalePageMs: 150000,
     stableMs: 3000,
     maxAttempts: 2,
     // review | retry | fail | skip
@@ -151,6 +155,12 @@
     maxPromptsPerBatch: 2000,
     leaseTtlMs: 90000,
     heartbeatMs: 20000,
+    // 页面 -> 后台的单条消息回调兜底：MV3 在 SW 回收/冷启动窗口里可能永远不回调，
+    // 不加超时就会有一个 await send() 把主循环永久挂起，还不留任何异常日志。
+    msgTimeoutMs: 8000,
+    // 主循环活性判据：空闲阶段的迭代超过这么久没推进一次，就认定它停摆。
+    // lease 阶段（正在等出图）不算，正常生图本来就可能几分钟。
+    loopStallMs: 90000,
     // 空闲轮询：短周期且封顶。以前从 15 秒指数退避到 120 秒，
     // 一旦 SW 被回收丢一条消息，就会「越卡越久」，同时让 SW 更容易被回收。
     idlePollMs: 3000,

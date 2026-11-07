@@ -49,11 +49,16 @@
       const stableMs = Math.max(1000, cfg.stableMs || 3000);
       // 生成结束后允许图片晚到：ChatGPT 常先出文字/占位，图片稍后才插入
       const imageGraceMs = Math.max(20000, Math.min(45000, stableMs * 6));
+      // 页面与服务端脱节的收敛阈值：SSE 断流 / 标签页被冻结时，服务端已出图但这一页
+      // 永远等不到结果，还会一直显示「生成中」。别把整批队列拖到 5 分钟总超时。
+      const stalePageMs = Math.max(60000, cfg.stalePageMs || 150000);
 
       let candidate = null;
       let sawGenerating = false;
       let genEndAt = 0;
       let lastActivityAt = t0;
+      let lastProgressAt = t0;
+      let lastProgressSig = '';
       let done = false;
       let target = CGR.getMain();
 
@@ -179,6 +184,31 @@
         }
 
         const fresh = freshAll(anchor);
+
+        // 「服务端已出图、页面没跟上」：页面卡在生成中时，上面的 generating 分支会
+        // 每轮刷新 lastActivityAt，看起来一直很活跃，实际上消息数、正文、产物都没变过。
+        // 用页面内容签名判断真正的进展，长时间完全不变就提前收敛（待确认、绝不重发）。
+        const progressSig = [
+          probe.allMsgCount(),
+          probe.assistantCount(),
+          String(probe.lastAssistantText() || '').length,
+          fresh.length,
+          generating ? 1 : 0
+        ].join('|');
+        if (progressSig !== lastProgressSig) {
+          lastProgressSig = progressSig;
+          lastProgressAt = now;
+        }
+        if (!candidate && !fresh.length && now - lastProgressAt >= stalePageMs) {
+          return finish({
+            status: 'PAGE_STALE',
+            text: probe.lastAssistantText(),
+            diagnostic: probe.diagnose(before),
+            phase: generating ? 'stuck-generating' : 'dom-frozen',
+            stillGenerating: generating
+          });
+        }
+
         // 文件链接 / 附件卡片 / 带「下载全尺寸」按钮的站点生成图一旦出现就是最终交付物，
         // 不需要等满图片的稳定窗口，但依然要等回复结束（避免抓到生成中的占位）。
         const hasFileArtifact = fresh.some((f) => f.kind !== 'img' || f.siteDownload);

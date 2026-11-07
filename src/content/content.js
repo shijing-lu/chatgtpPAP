@@ -3,6 +3,13 @@
   if (window.__CGR_LOADED__) return;
   window.__CGR_LOADED__ = true;
 
+  /* 实例代次：后台强制重注入时把它 +1。旧实例的 loop / 心跳 / 等待日志定时器
+   * 仍挂在页面里，不主动停掉就会和新实例一起领任务、重复发提示词。 */
+  const instanceGen = (window.__CGR_INSTANCE__ = (Number(window.__CGR_INSTANCE__) || 0) + 1);
+  function instanceDead() {
+    return window.__CGR_INSTANCE__ !== instanceGen || contextDead;
+  }
+
   const CGR = root.CGR;
   const probe = root.CGR_PROBE;
   const composer = root.CGR_COMPOSER;
@@ -22,9 +29,15 @@
   let lastIdleReason = '';
   let lastIdleLogAt = 0;
 
+  /* 主循环活性：后台 PING 会把它带回去。消息监听器活着 ≠ 主循环活着，
+   * 后者才是「有没有继续往聊天框发提示词」的唯一事实。 */
+  let loopAlive = false;
+  let loopPhase = 'boot';
+  let lastLoopAt = Date.now();
+
   function send(msg) {
-    if (contextDead) return Promise.resolve(null);
-    return new Promise((resolve) => {
+    if (instanceDead()) return Promise.resolve(null);
+    const raw = new Promise((resolve) => {
       try {
         chrome.runtime.sendMessage(msg, (res) => {
           if (chrome.runtime.lastError) {
@@ -43,6 +56,10 @@
         resolve(null);
       }
     });
+    // SW 回收 / 冷启动窗口里的一条消息可能永远不回调。没有这层超时，
+    // 任何一个 await send() 都会把主循环永久挂起，而且不留异常日志：
+    // 监听器还在（PING 照样回 ok），心跳还在续租，后台就一直以为任务正常执行中。
+    return CGR.withTimeout(raw, CGR.LIMITS.msgTimeoutMs || 8000, null);
   }
 
   function waitForWork(ms) {
@@ -64,9 +81,50 @@
     if (wakeResolve) wakeResolve();
   }
 
+  /** 只在主循环自己的路径上调用；心跳定时器不算，否则「僵尸心跳」会伪装成活着的 loop */
+  function touchLoop(phase) {
+    lastLoopAt = Date.now();
+    if (phase) loopPhase = phase;
+  }
+
+  function loopStatus() {
+    const stallMs = CGR.LIMITS.loopStallMs || 90000;
+    // lease 阶段（等出图）本来就可能几分钟，不能用空闲阶段的阈值去误判它停摆。
+    const idleStall = loopPhase !== 'lease' && Date.now() - lastLoopAt > stallMs;
+    return {
+      alive: loopAlive && !instanceDead(),
+      phase: loopPhase,
+      lastLoopAt,
+      stalled: !loopAlive || instanceDead() || idleStall,
+      contextDead: !!contextDead,
+      instance: instanceGen
+    };
+  }
+
+  /** 借后台 PING 触发：页面 timer 在后台标签页会被节流到分钟级，看门狗不能只靠页面自己 */
+  function ensureLoopAlive() {
+    const st = loopStatus();
+    if (!st.stalled || st.contextDead) return false;
+    if (!st.alive && !loopBusy) {
+      // 主循环已经退出、又不是扩展重载导致的：本地直接拉起来，恢复派发
+      touchLoop('idle');
+      send({ type: MSG.LOG, level: 'warn', message: '页面主循环已退出，已自动重启并继续派发' });
+      loop();
+      return true;
+    }
+    // 仍卡在某个 await：本地不好强杀，把 stalled 交给后台做强制重注入（不新开标签页）
+    return false;
+  }
+
   function startHeartbeat(token) {
     stopHeartbeat();
     heartbeatTimer = setInterval(() => {
+      // 旧实例被强制重注入后必须闭嘴，否则它还会替一条早就没人执行的任务续租，
+      // 后台所有自愈都会因为「有任务在跑」而集体跳过。
+      if (instanceDead()) {
+        stopHeartbeat();
+        return;
+      }
       send({ type: MSG.LEASE_HEARTBEAT, leaseToken: token });
     }, CGR.LIMITS.heartbeatMs);
   }
@@ -222,6 +280,11 @@
       // 图片生成慢时持续报进度，用户能分清「还在等」和「卡死了」
       const sentAt = Date.now();
       waitingTimer = setInterval(() => {
+        if (instanceDead()) {
+          clearInterval(waitingTimer);
+          waitingTimer = 0;
+          return;
+        }
         send({
           type: MSG.LOG,
           level: 'info',
@@ -240,6 +303,12 @@
           type: MSG.LOG,
           level: 'info',
           message: `#${item.index + 1} 检测到 ${n} 个产物（${kinds || 'img'}${res.loose ? '，含宽松规则命中' : ''}），已按页面顺序交给后台，默认只下载第 1 张`
+        });
+      } else if (res.status === 'PAGE_STALE') {
+        send({
+          type: MSG.LOG,
+          level: 'warn',
+          message: `#${item.index + 1} 页面长时间没有任何更新，服务端可能已经出图（手机端能看到就属于这种）。刷新这个标签页通常立刻就能看到图；本条按「待确认」处理，绝不会重发提示词`
         });
       } else if (res.diagnostic) {
         const d = res.diagnostic;
@@ -278,9 +347,11 @@
   async function loop() {
     if (loopBusy) return;
     loopBusy = true;
+    loopAlive = true;
+    touchLoop('idle');
     try {
-      while (true) {
-        if (contextDead) return; // 扩展已重载，本实例作废
+      // 实例代次变了（后台强制重注入）或扩展重载：旧实例立刻退出，别和新实例抢任务
+      while (!instanceDead()) {
         try {
           await loopOnce();
         } catch (e) {
@@ -290,11 +361,14 @@
       }
     } finally {
       loopBusy = false;
+      loopAlive = false;
+      if (instanceDead()) loopPhase = 'dead';
     }
   }
 
   /** 循环体的一次迭代；用 return 代替 continue，异常由外层兜住 */
   async function loopOnce() {
+    touchLoop('idle');
     if (!CGR.isChatSite()) {
       await waitForWork(idleWait);
       return;
@@ -356,7 +430,9 @@
     lastIdleReason = '';
     lastIdleLogAt = 0;
 
+    touchLoop('lease');
     await runLease(grant);
+    touchLoop('idle');
     send({ type: MSG.LOG, level: 'info', message: `#${grant.item.index + 1} 本轮结束，请求下一条` });
 
     const cfg = grant.cfg || CGR.DEFAULTS;
@@ -512,19 +588,25 @@
 
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (!msg || !msg.type) return false;
+    // 已被强制重注入的旧实例必须彻底闭嘴，否则两个监听器会同时应答同一条 PING，
+    // 后台可能拿到旧实例的「停摆」状态，反而反复重注入。
+    if (instanceDead()) return false;
     switch (msg.type) {
       case MSG.PING:
+        // 后台每 30 秒必发一次：既打断空闲等待，也顺带做一次主循环看门狗检查
+        ensureLoopAlive();
         pokeIdle();
-        sendResponse({ ok: true, ts: Date.now() });
+        sendResponse({ ok: true, ts: Date.now(), loop: loopStatus() });
         return false;
       case MSG.WAKE:
+        ensureLoopAlive();
         pokeIdle();
-        sendResponse({ ok: true });
+        sendResponse({ ok: true, loop: loopStatus() });
         return false;
       case MSG.EVALUATE:
         pokeIdle();
         watch.triggerEvaluate();
-        sendResponse({ ok: true });
+        sendResponse({ ok: true, loop: loopStatus() });
         return false;
       case MSG.ABORT:
         if (current) current.aborted = true;
