@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>ChatGPT 批量生图助手</title>
+    <title>批量生图助手 · ChatGPT / Gemini</title>
     <link rel="stylesheet" href="sidepanel.css" />
   </head>
   <body>
@@ -50,6 +50,11 @@
               <input id="batchFolderInput" class="input" type="text" placeholder="留空=基础目录/批次名" />
             </div>
           </div>
+          <div class="field">
+            <label class="lbl" for="batchSiteInput">工作站点</label>
+            <select id="batchSiteInput" class="input" title="这个批次的提示词发到哪个网站生图"></select>
+            <div class="hint" id="batchSiteHint">每个批次绑定一个站点；开始后只接管该站点的标签页，运行中不能切换。</div>
+          </div>
           <div class="row">
             <button id="btnSaveBatch" class="btn primary small">保存批次设置</button>
             <span class="hint" id="batchHint"></span>
@@ -95,6 +100,8 @@
         <div class="list-tools">
           <label class="chk"><input type="checkbox" id="chkAll" /><span>全选</span></label>
           <span class="sel-count" id="selCount">已选 0 条</span>
+          <button id="btnCopySelected" class="btn small ghost" title="复制选中条目的完整提示词">复制选中</button>
+          <button id="btnCopyAll" class="btn small ghost" title="复制本批次全部完整提示词">复制全部</button>
           <button id="btnDeleteSelected" class="link-danger" disabled>删除选中</button>
         </div>
 
@@ -119,7 +126,7 @@
           <div class="ref-list" id="refList"></div>
 
           <div class="hint" id="advHint"></div>
-          <div class="hint">参考图会先上传到 ChatGPT 输入框，传完再发提示词；每条任务单独附加，不会被下一条复用。最多 4 张。</div>
+          <div class="hint">参考图会先上传到当前工作站点的输入框，传完再发提示词；每条任务单独附加，不会被下一条复用。最多 4 张。</div>
         </div>
 
         <div class="list" id="advList"></div>
@@ -148,7 +155,7 @@
             <button id="btnAddPremise" class="add-btn" title="添加前提">＋</button>
           </div>
           <div class="hint" id="premiseHint">当前 0 条</div>
-          <div class="hint">每条新对话开始时逐条发送，每条都等 ChatGPT 回复写完才发下一条；不生图、不下载；各批次互不影响。</div>
+          <div class="hint">每条新对话开始时逐条发送，每条都等工作站点回复写完才发下一条；不生图、不下载；各批次互不影响。</div>
         </div>
         <div class="list" id="premiseList"></div>
         <div class="empty" id="premiseEmpty">这个批次还没有前提设定。</div>
@@ -208,7 +215,7 @@
               <option value="first">只下载第一张（默认）</option>
               <option value="best">下载评分最高的一张（旧行为）</option>
             </select>
-            <div class="hint">默认按 ChatGPT 页面上的先后顺序，只保存第 1 张，一条任务只产生一个文件；其余图不会下载。旧行为会挑尺寸最大或「4K 高清原图」链接那张。</div>
+            <div class="hint">默认按页面上的先后顺序，只保存第 1 张，一条任务只产生一个文件；其余图不会下载。旧行为会挑尺寸最大或「4K 高清原图」链接那张。</div>
           </div>
 
           <div class="field two">
@@ -233,7 +240,7 @@
             </div>
           </div>
           <div class="field">
-            <label class="chk"><input type="checkbox" id="premiseWaitReply" /><span>每条前提都等 ChatGPT 回复写完，才发下一条（含第一条）</span></label>
+            <label class="chk"><input type="checkbox" id="premiseWaitReply" /><span>每条前提都等工作站点回复写完，才发下一条（含第一条）</span></label>
             <div class="hint">
               检测到回复文字出现、停止生成消失、回复文本稳定后才继续；<b>最后一条前提之后同样要等</b>，之后才发第一条生图提示词。
               超时只记警告并继续，不会重发。关掉这个开关则只按「前提最小间隔」放行，不等回复。
@@ -279,7 +286,7 @@
           <div class="lbl">维护 / 一键重置</div>
           <div class="hint">
             卡住、批次异常中断、前提发不出去时点「一键重置」：停止所有批次，清掉残留租约、标签页绑定与连续失败计数，
-            把生成中 / 失败 / 待确认的任务退回待生成，并重新接管当前已打开的 ChatGPT 标签页（不会新开标签页）。
+            把生成中 / 失败 / 待确认的任务退回待生成，并重新接管当前已打开的对应站点标签页（不会新开标签页）。
             <b>提示词、前提设定、下载目录和设置全部保留</b>，重置后直接点「开始」即可。已完成的图不会重跑。
           </div>
           <div class="row gap">
@@ -342,9 +349,11 @@
     <div class="toast" id="toast"></div>
 
     <script src="../shared/constants.js"></script>
+    <script src="../shared/sites.js"></script>
     <script src="../shared/version.js"></script>
     <script src="../shared/slug.js"></script>
     <script src="../shared/markdown.js"></script>
+    <script src="../shared/prompt-copy.js"></script>
     <script src="sidepanel.js"></script>
   </body>
 </html>

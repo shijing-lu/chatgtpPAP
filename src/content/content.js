@@ -79,7 +79,15 @@
   /** 结果上报必须确认送达：丢一条 OUTCOME，后台就会在租约过期后把任务退回队列，
    * 重新发一次提示词、重新生成一张图。SW 冷启动/回收时的丢包是常态。 */
   async function report(leaseToken, status, data) {
-    const msg = { type: MSG.OUTCOME, leaseToken, status, data: data || {} };
+    // 带上页面站点：后台要据此选择「直链下载」还是「点站点按钮取全尺寸图」，
+    // 也能发现标签页被导航到另一个站点后仍在领旧批次任务的情况。
+    const msg = {
+      type: MSG.OUTCOME,
+      leaseToken,
+      status,
+      site: typeof CGR.currentSiteId === 'function' ? CGR.currentSiteId() : '',
+      data: Object.assign({ site: typeof CGR.currentSiteId === 'function' ? CGR.currentSiteId() : '' }, data || {})
+    };
     for (let i = 0; i < 4; i++) {
       const res = await send(msg);
       if (res && res.ok !== false) return res;
@@ -128,7 +136,7 @@
     startHeartbeat(leaseToken);
     let waitingTimer = 0;
     try {
-      if (!CGR.isChatGPT()) {
+      if (!CGR.isChatSite()) {
         await report(leaseToken, 'NAVIGATED');
         return;
       }
@@ -238,7 +246,7 @@
         send({
           type: MSG.LOG,
           level: 'warn',
-          message: `#${item.index + 1} ${res.status} 页面实况：img ${d.totalImgs} / 新增 ${d.freshImgs} / 规则命中 ${d.strictHits} / 链接 ${d.freshLinks || 0} / 附件 ${d.fileCards || 0} / canvas ${d.canvases} / 消息 ${d.msgNodes} / 停止按钮 ${d.stopHit ? '命中' : '未命中'}`
+          message: `#${item.index + 1} ${res.status} 页面实况（站点 ${d.site || CGR.currentSiteLabel()}）：img ${d.totalImgs} / 新增 ${d.freshImgs} / 规则命中 ${d.strictHits} / 链接 ${d.freshLinks || 0} / 附件 ${d.fileCards || 0} / canvas ${d.canvases} / 消息 ${d.msgNodes} / 停止按钮 ${d.stopHit ? '命中' : '未命中'}${d.site === 'gemini' ? ` / 生成图容器 ${d.generatedBoxes || 0} / 全尺寸下载按钮 ${d.siteDownloadButtons || 0}` : ''}`
         });
         for (const s of d.samples || []) {
           send({ type: MSG.LOG, level: 'warn', message: `  ↳ ${s}` });
@@ -287,7 +295,7 @@
 
   /** 循环体的一次迭代；用 return 代替 continue，异常由外层兜住 */
   async function loopOnce() {
-    if (!CGR.isChatGPT()) {
+    if (!CGR.isChatSite()) {
       await waitForWork(idleWait);
       return;
     }
@@ -299,7 +307,7 @@
         send({
           type: MSG.LOG,
           level: 'warn',
-          message: `当前页面找不到输入框（第 ${noComposerHits} 次），任务无法开始。请确认停在 chatgpt.com 的对话页，必要时刷新页面`
+          message: `当前页面找不到输入框（第 ${noComposerHits} 次），任务无法开始。请确认停在 ${CGR.currentSiteLabel()} 的对话页，必要时刷新页面`
         });
       }
       await waitForWork(4000);
@@ -308,10 +316,15 @@
     noComposerHits = 0;
 
     // SW 冷启动时的第一条消息容易丢，立刻补一次；丢包不再被当成「要退避」的信号
-    let grant = await send({ type: MSG.LEASE_REQUEST, convId: CGR.getConvId() });
+    const leaseReq = () => ({
+      type: MSG.LEASE_REQUEST,
+      convId: CGR.getConvId(),
+      site: typeof CGR.currentSiteId === 'function' ? CGR.currentSiteId() : ''
+    });
+    let grant = await send(leaseReq());
     if (!grant) {
       await CGR.sleep(400);
-      grant = await send({ type: MSG.LEASE_REQUEST, convId: CGR.getConvId() });
+      grant = await send(leaseReq());
     }
     if (!grant || !grant.ok) {
       const reason = (grant && grant.reason) || 'no-response';
@@ -327,6 +340,7 @@
           'limit_waiting': '限额冷却中',
           finished: '批次已完成',
           'no-batch': '这个标签页不是执行页（执行页长时间没来领任务时会自动接管）',
+          'site-mismatch': '这个标签页的站点与批次绑定的站点不一致，请在批次设置里改「工作站点」',
           'conv-conflict': '与另一个标签页抢同一个对话',
           'no-response': '后台无响应（扩展可能正在重启）'
         }[reason] || reason;
@@ -457,6 +471,43 @@
     }
   }
 
+  /* ---------------- 站点全尺寸下载（Gemini） ---------------- */
+
+  /** Gemini 生成图在页面里是 1024px 预览（blob:），点容器里的
+   * 「Download full size image」才会产出真正的全尺寸文件。
+   * 后台已经登记好目标文件名（下载意图表），这里只负责点按钮：
+   * 不导航、不开新标签页，下载由 onDeterminingFilename 归位到批次目录。 */
+  function clickSiteDownload(msg) {
+    const idx = msg.index != null ? msg.index + 1 : '?';
+    const btn = probe.findSiteDownloadButton ? probe.findSiteDownloadButton(msg.src) : null;
+    if (!btn || !btn.click) {
+      send({
+        type: MSG.LOG,
+        level: 'error',
+        message: `#${idx} 找不到「下载全尺寸图片」按钮，图片可能只剩预览；可在页面手动保存`
+      });
+      return false;
+    }
+    try {
+      const inner = btn.tagName === 'A' ? btn : btn.querySelector && btn.querySelector('a');
+      if (inner && inner.setAttribute) {
+        inner.setAttribute('target', '_self');
+        const wanted = String(msg.filename || '').split('/').pop();
+        if (wanted) inner.setAttribute('download', wanted);
+      }
+      btn.click();
+      send({
+        type: MSG.LOG,
+        level: 'info',
+        message: `#${idx} 已点击${CGR.currentSiteLabel()}的全尺寸下载按钮，由后台归位到 ${msg.filename || '批次目录'}（不会新开标签页）`
+      });
+      return true;
+    } catch (e) {
+      send({ type: MSG.LOG, level: 'error', message: `#${idx} 点击全尺寸下载失败：${String((e && e.message) || e)}` });
+      return false;
+    }
+  }
+
   /* ---------------- 消息路由 ---------------- */
 
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -478,6 +529,9 @@
       case MSG.ABORT:
         if (current) current.aborted = true;
         sendResponse({ ok: true });
+        return false;
+      case MSG.CLICK_SITE_DOWNLOAD:
+        sendResponse({ ok: clickSiteDownload(msg) });
         return false;
       case 'FETCH_IMAGE':
         fetchAndUpload(msg.index, msg.src, msg.batchId, {
@@ -506,7 +560,12 @@
     // 若让 loop 先领了任务、HELLO 才到，刚领到的新任务会被当成旧租约退回。
     // 加 3 秒上限，避免 SW 冷启动丢消息时把启动卡死。
     await CGR.withTimeout(
-      send({ type: MSG.HELLO, url: location.href, convId: CGR.getConvId() }),
+      send({
+        type: MSG.HELLO,
+        url: location.href,
+        convId: CGR.getConvId(),
+        site: typeof CGR.currentSiteId === 'function' ? CGR.currentSiteId() : ''
+      }),
       3000,
       null
     );

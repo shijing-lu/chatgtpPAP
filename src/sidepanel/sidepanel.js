@@ -66,6 +66,23 @@
     return false;
   }
 
+  /** 复制完整提示词：视图里的 p 只有 240 字预览，所以向后台取原文。
+   *  indexes 为空 = 整批；否则只复制指定条目（单条按钮／多选复制）。 */
+  async function copyPrompts(indexes) {
+    const bid = curId();
+    if (!bid) return toast('还没有批次');
+    const wanted = Array.isArray(indexes) && indexes.length ? indexes : [];
+    const res = await send(CGR.CMD.GET_PROMPTS, { batchId: bid, indexes: wanted });
+    if (!res || !res.ok) return toast((res && res.error) || '读取提示词失败');
+    const list = res.prompts || [];
+    const text = wanted.length
+      ? CGR.PROMPT_COPY.selected(list, wanted)
+      : CGR.PROMPT_COPY.all(list);
+    if (!text) return toast('没有可复制的提示词');
+    const ok = await CGR.PROMPT_COPY.write(text);
+    toast(ok ? `已复制 ${list.length} 条完整提示词` : '复制失败，请检查剪贴板权限');
+  }
+
   /* ---------------- 渲染 ---------------- */
 
   const PILL_CLASS = {
@@ -123,15 +140,35 @@
     $('btnDeleteBatch').disabled = !list.length;
   }
 
+  let siteOptionsDone = false;
+  function fillSiteOptions() {
+    if (siteOptionsDone) return;
+    const sel = $('batchSiteInput');
+    sel.textContent = '';
+    const sites = Array.isArray(CGR.SITES) && CGR.SITES.length
+      ? CGR.SITES
+      : [{ id: 'chatgpt', label: 'ChatGPT' }, { id: 'gemini', label: 'Gemini' }];
+    for (const s of sites) {
+      const o = document.createElement('option');
+      o.value = s.id;
+      o.textContent = s.label;
+      sel.append(o);
+    }
+    siteOptionsDone = true;
+  }
+
   function renderBatchFields(v) {
+    fillSiteOptions();
     const c = v.current;
     if (!c) {
       $('batchNameInput').value = '';
       $('batchFolderInput').value = '';
       $('batchNameInput').disabled = true;
       $('batchFolderInput').disabled = true;
+      $('batchSiteInput').disabled = true;
       $('btnSaveBatch').disabled = true;
       $('batchPathHint').textContent = '';
+      $('batchSiteHint').textContent = '每个批次绑定一个站点；开始后只接管该站点的标签页。';
       return;
     }
     $('batchNameInput').disabled = false;
@@ -145,8 +182,15 @@
     if (!batchDirty) {
       $('batchNameInput').value = c.name || '';
       $('batchFolderInput').value = c.folder || '';
+      $('batchSiteInput').value = c.site || (CGR.SITE_IDS && CGR.SITE_IDS[0]) || 'chatgpt';
       $('batchFolderInput').placeholder = `留空=基础目录/${c.name || '批次名'}`;
     }
+    const running = c.status === 'running';
+    $('batchSiteInput').disabled = running;
+    const siteLabel = CGR.siteLabel ? CGR.siteLabel(c.site || 'chatgpt') : c.site;
+    $('batchSiteHint').textContent = running
+      ? `当前绑定到 ${siteLabel}；运行中不能切换工作站点，请先暂停或停止。`
+      : `当前绑定到 ${siteLabel}；开始后只接管该站点的标签页，运行中不能切换。`;
 
     // 直接把最终落盘路径算给用户看：目录没生效 / 没点保存时一眼就能发现
     const cfg = v.cfg || {};
@@ -161,7 +205,7 @@
     });
     $('batchPathHint').textContent =
       `实际保存位置：系统下载目录 / ${dir} / ${sample}.png` +
-      (batchDirty ? '（目录或名称有未保存修改，请点「保存批次设置」）' : '');
+      (batchDirty ? '（名称／目录／工作站点有未保存修改，请点「保存批次设置」）' : '');
   }
 
   function renderProgress(v) {
@@ -291,6 +335,8 @@
         })
       );
     }
+    // 复制的是完整提示词（后台原文），不是列表里截断到 240 字的预览
+    meta.append(call('复制', 'muted', () => copyPrompts([it.i])));
 
     row.append(top, meta);
     return row;
@@ -301,6 +347,8 @@
     const selectable = items.filter((it) => !isActiveStatus(it.s));
     $('selCount').textContent = `已选 ${selected.size} 条 / 共 ${items.length} 条`;
     $('btnDeleteSelected').disabled = selected.size === 0;
+    $('btnCopySelected').disabled = selected.size === 0;
+    $('btnCopyAll').disabled = items.length === 0;
     const all = $('chkAll');
     all.disabled = selectable.length === 0;
     all.checked = selectable.length > 0 && selectable.every((it) => selected.has(it.i));
@@ -361,9 +409,10 @@
     const stuck = needsFix && !counts.active && counts.pending > 0 && (noTabs || idleFor > 15000);
     bar.style.display = stuck ? 'flex' : 'none';
     if (stuck) {
+      const site = c.siteLabel || (CGR.siteLabel ? CGR.siteLabel(c.site || 'chatgpt') : '对话站点');
       $('stuckText').textContent = noTabs
-        ? `批次「${c.name}」显示运行中，但没有绑定任何 ChatGPT 标签页（常见于扩展重载后）。点「立即修复」复用当前标签页重新接管，不会新开窗口。`
-        : `批次「${c.name}」的执行页 ${Math.round(idleFor / 1000)} 秒没来领任务，其它 ChatGPT 标签页会自动接管；也可点「立即修复」让当前页直接接管。`;
+        ? `批次「${c.name}」显示运行中，但没有绑定任何 ${site} 标签页（常见于扩展重载后）。点「立即修复」复用当前标签页重新接管，不会新开窗口。`
+        : `批次「${c.name}」的执行页 ${Math.round(idleFor / 1000)} 秒没来领任务，其它 ${site} 标签页会自动接管；也可点「立即修复」让当前页直接接管。`;
     }
   }
 
@@ -848,7 +897,8 @@
     const note = $('premiseNote');
     if (c && c.premiseEnabled !== false && (c.premises || []).length) {
       note.style.display = 'block';
-      note.textContent = `「${c.name}」已启用 ${c.premises.length} 条前提：逐条等 ChatGPT 回复写完才发下一条，最后一条回复后才开始生图`;
+      const site = (cur() && cur().siteLabel) || (CGR.siteLabel ? CGR.siteLabel((cur() && cur().site) || 'chatgpt') : '对话站点');
+      note.textContent = `「${c.name}」已启用 ${c.premises.length} 条前提：逐条等${site}回复写完才发下一条，最后一条回复后才开始生图`;
     } else {
       note.style.display = 'none';
     }
@@ -894,7 +944,8 @@
   /* ---------------- 批次 ---------------- */
 
   async function newBatch() {
-    const res = await send(CGR.CMD.BATCH_CREATE, { name: '' });
+    // 新批次继承当前下拉里选的工作站点，省得每建一个都要重新选一次
+    const res = await send(CGR.CMD.BATCH_CREATE, { name: '', site: $('batchSiteInput').value });
     if (res.ok) {
       batchDirty = false;
       toast(`已新建「${res.batch.name}」，可在上方改名`);
@@ -908,7 +959,8 @@
     if (!bid) return;
     const name = $('batchNameInput').value.trim();
     const folder = $('batchFolderInput').value.trim();
-    const res = await send(CGR.CMD.BATCH_UPDATE, { id: bid, patch: { name, folder } });
+    const site = $('batchSiteInput').value;
+    const res = await send(CGR.CMD.BATCH_UPDATE, { id: bid, patch: { name, folder, site } });
     if (res.ok) {
       batchDirty = false;
       $('batchHint').textContent = '已保存';
@@ -1207,6 +1259,12 @@
         batchDirty = true;
       });
     });
+    // <select> 在部分 Chromium 版本只发 change 不发 input，两个都监听
+    ['input', 'change'].forEach((ev) => {
+      $('batchSiteInput').addEventListener(ev, () => {
+        batchDirty = true;
+      });
+    });
     $('btnSaveBatch').addEventListener('click', saveBatch);
 
     // 加入队列
@@ -1300,7 +1358,7 @@
       const res = await send(CGR.CMD.START, { batchId: bid });
       if (!res.ok) toast(res.error || '启动失败');
       else if (res.warning) toast(res.warning);
-      else toast('已开始，就在当前这个 ChatGPT 标签页里跑');
+      else toast(`已开始，就在当前这个 ${cur().siteLabel || (CGR.siteLabel ? CGR.siteLabel(cur().site || 'chatgpt') : '对话站点')} 标签页里跑`);
     });
 
     $('btnPause').addEventListener('click', async () => {
@@ -1335,7 +1393,7 @@
       btn.disabled = false;
       btn.textContent = '立即修复';
       if (res.ok) toast(`已重新接管 ${res.fixed.length} 个标签页${res.rebound ? '（并重新绑定批次）' : ''}，任务接着跑`);
-      else toast(res.error || '修复失败，请手动刷新 chatgpt.com');
+      else toast(res.error || '修复失败，请手动刷新对应站点页面');
     });
 
     // 一键重置：主按钮直接执行（不删任何数据）；清空全部数据需要再点一次确认
@@ -1347,6 +1405,9 @@
     });
 
     // 多选
+    $('btnCopyAll').addEventListener('click', () => copyPrompts([]));
+    $('btnCopySelected').addEventListener('click', () => copyPrompts(Array.from(selected)));
+
     $('chkAll').addEventListener('change', () => {
       const items = (cur() && cur().items) || [];
       if ($('chkAll').checked) {

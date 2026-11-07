@@ -179,9 +179,9 @@
         }
 
         const fresh = freshAll(anchor);
-        // 文件链接 / 附件卡片一旦出现就是最终交付物，不会再像 <img> 那样换高清版本，
+        // 文件链接 / 附件卡片 / 带「下载全尺寸」按钮的站点生成图一旦出现就是最终交付物，
         // 不需要等满图片的稳定窗口，但依然要等回复结束（避免抓到生成中的占位）。
-        const hasFileArtifact = fresh.some((f) => f.kind !== 'img');
+        const hasFileArtifact = fresh.some((f) => f.kind !== 'img' || f.siteDownload);
         if (fresh.length) {
           const head = fresh[0];
           if (!firstEl) {

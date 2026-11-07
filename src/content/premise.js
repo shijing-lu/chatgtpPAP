@@ -213,7 +213,8 @@
 
       if (p.waitReply) {
         if (st.finished) {
-          log('info', `前提 ${i + 1}/${items.length} 已检测到 ChatGPT 回复并写完（等了 ${sec} 秒），现在才允许发下一条`);
+          const site = typeof CGR.currentSiteLabel === 'function' ? CGR.currentSiteLabel() : '对话站点';
+          log('info', `前提 ${i + 1}/${items.length} 已检测到${site}回复并写完（等了 ${sec} 秒），现在才允许发下一条`);
         } else {
           log('warn', `前提 ${i + 1}/${items.length} 等了 ${sec} 秒仍没检测到完整回复，按超时放行（不重发、不判失败）；可在设置里调大「前提等回复超时」`);
         }

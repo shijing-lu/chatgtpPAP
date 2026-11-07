@@ -36,11 +36,21 @@
     return { selectedBatchId: '', activeTabs: {} };
   }
 
+  function defaultSite() {
+    return (CGR.SITE_IDS && CGR.SITE_IDS[0]) || 'chatgpt';
+  }
+
+  /** 站点 id 合法性：老数据 / 手工消息里出现未知站点时一律回落到默认站点 */
+  function normalizeSite(site) {
+    return CGR.siteMeta && CGR.siteMeta(site) ? site : defaultSite();
+  }
+
   function newBatchRecord(name) {
     return {
       id: '',
       name: name || '',
       createdAt: Date.now(),
+      site: defaultSite(),
       folder: '',
       premises: [],
       premiseEnabled: true,
@@ -214,11 +224,12 @@
     return batch;
   }
 
-  async function createBatch(name) {
+  async function createBatch(name, site) {
     await ensureLoaded();
     const id = CGR.uuid();
     const rec = newBatchRecord(name || `批次 ${S.batches.size + 1}`);
     rec.id = id;
+    rec.site = normalizeSite(site);
     rec.createdAt = Date.now();
     S.batches.set(id, rec);
     S.items.set(id, new Map());
@@ -295,6 +306,16 @@
     const out = [];
     for (const bag of S.items.values()) out.push(...bag.values());
     return out;
+  }
+
+  /** 队列复制用的完整提示词。视图里的 p 字段只截 240 字，不能拿去复制。
+   *  indexes 为空时返回整批；否则按 index 精确取（顺序与队列一致）。 */
+  function getPrompts(bid, indexes) {
+    const items = getItems(bid);
+    const wanted = Array.isArray(indexes) && indexes.length ? new Set(indexes.map(Number)) : null;
+    return items
+      .filter((it) => !wanted || wanted.has(it.index))
+      .map((it) => ({ index: it.index, prompt: String(it.prompt || '') }));
   }
 
   /** 批次的实际下载目录：显式设置优先，否则 基础目录/批次名 */
@@ -407,6 +428,8 @@
       return {
         id: b.id,
         name: b.name,
+        site: b.site || defaultSite(),
+        siteLabel: typeof CGR.siteLabel === 'function' ? CGR.siteLabel(b.site || defaultSite()) : '',
         count: b.count || items.length,
         folder: b.folder || '',
         status: b.status || 'idle',
@@ -432,6 +455,8 @@
         ? {
             id: cur.id,
             name: cur.name,
+            site: cur.site || defaultSite(),
+            siteLabel: typeof CGR.siteLabel === 'function' ? CGR.siteLabel(cur.site || defaultSite()) : '',
             folder: cur.folder || '',
             premises: cur.premises || [],
             premiseEnabled: cur.premiseEnabled !== false,
@@ -475,6 +500,8 @@
     putItem,
     clearItems,
     allItems,
+    getPrompts,
+    normalizeSite,
     addLog,
     getLogs,
     clearLogs,

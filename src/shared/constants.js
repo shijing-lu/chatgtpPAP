@@ -72,7 +72,9 @@
     DL_CHUNK: 'DL_CHUNK',
     DL_COMMIT: 'DL_COMMIT',
     SELFCHECK: 'SELFCHECK',
-    SNAPSHOT: 'SNAPSHOT'
+    SNAPSHOT: 'SNAPSHOT',
+    // 后台 -> 内容：点当前站点的「下载全尺寸图片」按钮（Gemini）
+    CLICK_SITE_DOWNLOAD: 'CLICK_SITE_DOWNLOAD'
   };
 
   // side panel -> service worker 命令
@@ -98,7 +100,9 @@
     EXPORT_LOGS: 'EXPORT_LOGS',
     FIX_TABS: 'FIX_TABS',
     OPEN_ITEM_TAB: 'OPEN_ITEM_TAB',
-    RESET: 'RESET'
+    RESET: 'RESET',
+    // 侧边栏复制提示词：视图里的 prompt 只有 240 字预览，完整原文在这里取
+    GET_PROMPTS: 'GET_PROMPTS'
   };
 
   // 一键重置的两种范围：runtime 只清运行态（保留全部数据），factory 恢复出厂设置
@@ -160,4 +164,15 @@
     claimTakeoverMs: 10000,
     maxLogs: 400
   };
+
+  /* 站点模块的兼容垫片：生产环境 sites.js 会在 constants.js 之后加载并覆盖这些实现。
+   * 零依赖回归测试若只加载 constants.js + 某个后台模块，也得能跑出默认站点行为。 */
+  if (!Array.isArray(CGR.SITE_IDS)) CGR.SITE_IDS = ['chatgpt', 'gemini'];
+  if (typeof CGR.siteLabel !== 'function') {
+    CGR.siteLabel = (id) => (id === 'gemini' ? 'Gemini' : id === 'chatgpt' ? 'ChatGPT' : '自动');
+  }
+  if (typeof CGR.siteMeta !== 'function') {
+    CGR.siteMeta = (id) => (CGR.SITE_IDS.includes(id) ? { id, label: CGR.siteLabel(id) } : null);
+  }
+  if (typeof CGR.currentSiteLabel !== 'function') CGR.currentSiteLabel = () => 'ChatGPT';
 })(typeof globalThis !== 'undefined' ? globalThis : self);

@@ -43,6 +43,76 @@
     return /^https?:\/\//i.test(src) && CGR.FILE_EXT_RE.test(src);
   }
 
+  /* Gemini 的生成图是 <generated-image> 容器里的 blob: 预览图，容器里另有
+   * 「Download full size image」按钮。只靠图片差集会下载到 1024px 预览，
+   * 所以产物要带上「本站点可以点按钮拿全尺寸图」的标记，交给下载层决策。 */
+  function siteIdNow() {
+    return typeof CGR.currentSiteId === 'function' ? CGR.currentSiteId() : '';
+  }
+
+  function isGemini() {
+    return siteIdNow() === 'gemini';
+  }
+
+  function generatedBoxSels() {
+    return (CGR.SEL && CGR.SEL.generatedImageBox) || [];
+  }
+
+  /** Gemini 页面上有大量 UI 图标（头像、工具栏），必须限定在生成图容器里。
+   * 容器选择器失效时退回到「blob: / Google 图片服务地址」，不至于完全漏检。 */
+  function siteImageAllowed(img) {
+    if (!isGemini()) return true;
+    const sels = generatedBoxSels();
+    if (sels.length) {
+      let boxes = [];
+      try {
+        boxes = CGR.pickAll(sels);
+      } catch (e) {
+        boxes = [];
+      }
+      if (boxes.length) {
+        try {
+          return !!img.closest(sels.join(', '));
+        } catch (e) {
+          return false;
+        }
+      }
+    }
+    const s = img.currentSrc || img.src || '';
+    return /^blob:/i.test(s) || /googleusercontent\.com|contrib_service|lh3\.|gstatic\.com/i.test(s);
+  }
+
+  /** 与某张生成图同容器的下载按钮（全尺寸图）。 */
+  function downloadButtonFor(img) {
+    if (!isGemini() || !img) return null;
+    const sels = generatedBoxSels();
+    let box = null;
+    if (sels.length) {
+      try {
+        box = img.closest(sels.join(', '));
+      } catch (e) {
+        box = null;
+      }
+    }
+    return CGR.pick(CGR.SEL.imageDownloadButton || [], box || CGR.getMain()) || null;
+  }
+
+  /** 供内容脚本点击：按 src 找到对应的生成图容器，返回它的下载按钮。
+   * 找不到完全匹配时退回到页面里最后一个带下载按钮的生成图。 */
+  function findSiteDownloadButton(src) {
+    if (!isGemini()) return null;
+    const wanted = normSrc(src || '');
+    let fallback = null;
+    for (const img of document.querySelectorAll('img')) {
+      if (!siteImageAllowed(img)) continue;
+      const btn = downloadButtonFor(img);
+      if (!btn) continue;
+      if (wanted && normSrc(img.currentSrc || img.src || '') === wanted) return btn;
+      fallback = btn;
+    }
+    return fallback;
+  }
+
   const CHROME_RE = /(^|[\s_-])(avatar|icon|logo|sprite|emoji|spinner)([\s_-]|$)/i;
 
   /** 差集用归一化 src：签名 URL 的 query 每次重渲染都变，
@@ -90,8 +160,10 @@
 
     if (img.closest) {
       if (img.closest('[data-message-author-role="user"]')) return false;
+      if (img.closest('user-query, [data-test-id*="user-query" i]')) return false;
       if (img.closest('nav, aside, header, footer, [data-testid*="sidebar" i], [data-testid*="nav" i]')) return false;
     }
+    if (!siteImageAllowed(img)) return false;
     return true;
   }
 
@@ -152,6 +224,7 @@
     try {
       return (
         !!el.closest('[data-message-author-role="user"]') ||
+        !!el.closest('user-query, [data-test-id*="user-query" i]') ||
         !!el.closest('nav, aside, header, footer, [data-testid*="sidebar" i], [data-testid*="nav" i]')
       );
     } catch (e) {
@@ -343,13 +416,19 @@
       if (!isLikelyGenerated(img, loose)) continue;
       if (!afterAnchor(afterNode, img)) continue;
       seen.add(key);
+      // Gemini：同一容器里若有「下载全尺寸图片」按钮，就走站点按钮拿原图，
+      // 而不是下载 blob: 预览图。标记随产物一起上报给后台。
+      const siteDownload = !!downloadButtonFor(img);
       out.push({
         _el: img,
         src,
         w: img.naturalWidth || 0,
         h: img.naturalHeight || 0,
         loose: !!loose,
-        known: isImageSrc(src)
+        known: isImageSrc(src),
+        site: siteIdNow() || '',
+        siteDownload,
+        downloadLabel: siteDownload ? '全尺寸图片' : ''
       });
     }
     return out;
@@ -467,6 +546,9 @@
       freshLinks: links.length,
       fileCards: cards.length,
       artifactHits: artifacts.length,
+      site: siteIdNow() || '',
+      generatedBoxes: isGemini() ? CGR.pickAll(generatedBoxSels()).length : 0,
+      siteDownloadButtons: isGemini() ? CGR.pickAll(CGR.SEL.imageDownloadButton || []).length : 0,
       samples: freshAll
         .slice(0, 4)
         .map((f) => `${f.nw}x${f.nh} ${f.rw}px ${short(f.src)}`)
@@ -511,6 +593,10 @@
     isImageSrc,
     normSrc,
     isLikelyGenerated,
+    isGemini,
+    siteImageAllowed,
+    downloadButtonFor,
+    findSiteDownloadButton,
     linkScore,
     snapshot,
     freshImages,

@@ -140,7 +140,8 @@ async function main() {
     assert.strictEqual(res.gaps.length, 3);
     assert.ok(res.gaps.every((g) => g.replied && g.finished), '每条前提都必须检测到完整回复');
     const sends = h.sends();
-    const readyLogs = h.logs.filter((l) => /已检测到 ChatGPT 回复并写完/.test(l.message));
+    // 站点名会随工作站点变化（ChatGPT / Gemini），这里只认「检测到站点回复并写完」这个事件
+    const readyLogs = h.logs.filter((l) => /已检测到.*回复并写完/.test(l.message));
     assert.strictEqual(readyLogs.length, 3, '每条前提都要有「检测到回复」日志');
     for (let i = 1; i < sends.length; i++) {
       assert.ok(sends[i].at - sends[i - 1].at >= REPLY_MS, `第 ${i + 1} 条前提发得太早`);

@@ -2,6 +2,7 @@
  * 所有监听器都必须写在文件顶层同步执行，否则 SW 冷启动时收不到事件。 */
 importScripts(
   '../shared/constants.js',
+  '../shared/sites.js',
   '../shared/selectors.js',
   '../shared/slug.js',
   '../shared/sched.js',
@@ -121,7 +122,7 @@ async function wakeTick() {
         activeTabs[id] = Object.assign({}, info, { stale: true });
         await store.setRuntime({ activeTabs });
       });
-      store.addLog('warn', `执行页 ${id} 没有响应唤醒，已标记失联；其它 ChatGPT 标签页会自动接管`);
+      store.addLog('warn', `执行页 ${id} 没有响应唤醒，已标记失联；同站点的其它对话标签页会自动接管`);
     }
   }
 }
@@ -175,11 +176,14 @@ async function onHello(msg, sender) {
     const rt = store.getRuntime();
     const activeTabs = Object.assign({}, rt.activeTabs);
     const existed = activeTabs[tabId] && activeTabs[tabId].batchId;
+    // 站点以页面自己上报为准，收不到时用 sender.tab.url 兜底（后台不能读 location）
+    const site = msg.site || (typeof CGR.siteOf === 'function' ? CGR.siteOf(sender.tab && sender.tab.url) : '');
 
     if (existed) {
       // 只更新已登记的标签页，保留它的批次归属
       activeTabs[tabId] = Object.assign({}, activeTabs[tabId], {
         convId: msg.convId || '',
+        site,
         state: 'idle',
         at: Date.now()
       });
@@ -210,7 +214,10 @@ async function onLeaseRequest(msg, sender) {
       }
     }
   }
-  return orch.claim(tabId, convId);
+  const site = msg.site || (typeof CGR.siteOf === 'function'
+    ? CGR.siteOf(sender.tab && sender.tab.url)
+    : '');
+  return orch.claim(tabId, convId, site);
 }
 
 async function onOutcome(msg, sender) {
@@ -257,7 +264,14 @@ async function handleCommand(msg) {
   const p = msg.payload || {};
   switch (msg.cmd) {
     case CGR.CMD.BATCH_CREATE:
-      return orch.createBatch(p.name);
+      return orch.createBatch(p.name, p.site);
+    case CGR.CMD.GET_PROMPTS: {
+      await store.ensureLoaded();
+      const bid = p.batchId || store.getSelectedId();
+      if (!bid) return { ok: false, error: '还没有批次' };
+      const prompts = store.getPrompts(bid, p.indexes);
+      return { ok: true, batchId: bid, prompts };
+    }
     case CGR.CMD.BATCH_UPDATE:
       return orch.updateBatch(p.id, p.patch || {});
     case CGR.CMD.BATCH_DELETE:
@@ -310,12 +324,16 @@ async function handleCommand(msg) {
       return { ok: true };
     }
     case CGR.CMD.SELFCHECK: {
-      const list = await tabs.usableTabs();
-      if (!list.length) return { ok: false, error: '没有打开的 ChatGPT 标签页，请先打开 chatgpt.com' };
+      await store.ensureLoaded();
+      const b = store.getBatch(p.batchId || store.getSelectedId());
+      const site = store.normalizeSite(b && b.site);
+      const label = CGR.siteLabel(site);
+      const list = await tabs.usableTabs(site);
+      if (!list.length) return { ok: false, error: `没有打开的 ${label} 标签页，请先打开 ${label} 对话页` };
       const tabId = p.tabId || list[0].id;
       const res = await CGR.withTimeout(tabs.send(tabId, { type: CGR.MSG.SELFCHECK }), 8000, null);
-      if (!res) return { ok: false, error: '标签页无响应，请刷新 chatgpt.com 后重试' };
-      return { ok: true, report: res.report, tabId };
+      if (!res) return { ok: false, error: `标签页无响应，请刷新 ${label} 页面后重试` };
+      return { ok: true, report: res.report, tabId, site };
     }
     case CGR.CMD.OPEN_ITEM_TAB: {
       const item = store.getItem(p.batchId, p.index);
@@ -332,12 +350,17 @@ async function handleCommand(msg) {
       return { ok: true };
     }
     case CGR.CMD.FIX_TABS: {
-      // 一键修复：重新接管指定批次（不指定则接管所有 ChatGPT 标签页）
-      const list = await tabs.usableTabs();
-      if (!list.length) return { ok: false, error: '没有打开的 ChatGPT 标签页，请先打开 chatgpt.com' };
+      // 一键修复：重新接管指定批次（不指定则接管所有已打开的对话标签页）
+      await store.ensureLoaded();
+      const targetBatch = p.batchId;
+      const targetRec = targetBatch ? store.getBatch(targetBatch) : null;
+      // 只修同站点的标签页：Gemini 批次不该被「修」到 ChatGPT 页面上
+      const site = targetRec ? store.normalizeSite(targetRec.site) : '';
+      const label = site ? CGR.siteLabel(site) : '对话';
+      const list = await tabs.usableTabs(site);
+      if (!list.length) return { ok: false, error: `没有打开的 ${label} 标签页，请先打开 ${label} 对话页` };
 
       const rt = store.getRuntime();
-      const targetBatch = p.batchId;
       let candidates = list.filter((t) => {
         const info = (rt.activeTabs || {})[t.id];
         return !targetBatch || (info && info.batchId === targetBatch);
@@ -354,7 +377,7 @@ async function handleCommand(msg) {
       // 指定批次时优先把用户当前正在看的 ChatGPT 标签页纳为执行页；
       // 数量严格按并发设置截断，避免一次修复后冒出两个执行页并行生图。
       if (targetBatch) {
-        const here = await tabs.currentActiveChatTab();
+        const here = await tabs.currentActiveChatTab(site);
         const cfg = store.getCfg();
         const want = cfg.mode === CGR.MODE.PARALLEL
           ? Math.max(1, Math.min(cfg.concurrency || 1, CGR.LIMITS.maxConcurrency))
@@ -366,7 +389,7 @@ async function handleCommand(msg) {
       for (const t of candidates) {
         if (await tabs.ensureContentScript(t.id)) fixed.push(t.id);
       }
-      if (!fixed.length) return { ok: false, error: '接管失败，请手动刷新 chatgpt.com 后重试' };
+      if (!fixed.length) return { ok: false, error: `接管失败，请手动刷新 ${label} 页面后重试` };
 
       await store.withLock(async () => {
         const cur = store.getRuntime();
@@ -381,6 +404,7 @@ async function handleCommand(msg) {
         for (const id of fixed) {
           activeTabs[id] = Object.assign({}, activeTabs[id], {
             batchId: targetBatch || (activeTabs[id] && activeTabs[id].batchId) || '',
+            site: site || (activeTabs[id] && activeTabs[id].site) || '',
             state: 'idle',
             stale: false,
             at: Date.now()

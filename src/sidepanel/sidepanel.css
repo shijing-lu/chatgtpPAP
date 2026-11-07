@@ -695,9 +695,16 @@ select.input {
 .list-tools {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
   padding: 0 2px;
   flex: 0 0 auto;
+  /* 侧边栏较窄，加了「复制选中 / 复制全部」后允许折行，不挤掉删除按钮 */
+  flex-wrap: wrap;
+}
+
+.list-tools .btn {
+  padding: 3px 8px;
+  font-size: 11px;
 }
 
 .chk {

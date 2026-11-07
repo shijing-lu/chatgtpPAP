@@ -13,10 +13,22 @@
     const sendBtn = CGR.pick(CGR.SEL.sendButton);
     const main = CGR.pick(CGR.SEL.main);
 
-    out.push(item('page', '页面地址', CGR.isChatGPT(), location.href.slice(0, 90), '请把标签页打开到 chatgpt.com 的对话页面'));
+    const siteLabel = typeof CGR.currentSiteLabel === 'function' ? CGR.currentSiteLabel() : '对话站点';
+    const siteId = typeof CGR.currentSiteId === 'function' ? CGR.currentSiteId() : '';
+    const supported = typeof CGR.isChatSite === 'function' ? CGR.isChatSite() : CGR.isChatGPT();
+    out.push(item('page', '页面地址', supported, location.href.slice(0, 90), `请把标签页打开到 ${siteLabel} 的对话页面`));
+    out.push(item('site', '工作站点', !!siteId, siteId ? `${siteLabel}（${siteId}）` : '未识别到受支持的站点', '受支持站点：ChatGPT、Gemini；批次设置里可切换工作站点'));
 
     const loginWall = probe.hasLoginWall();
-    out.push(item('auth', '登录状态', !loginWall, loginWall ? '检测到登录入口/登录表单' : '未发现登录墙', '请在该标签页手动登录 ChatGPT'));
+    out.push(item('auth', '登录状态', !loginWall, loginWall ? '检测到登录入口/登录表单' : '未发现登录墙', `请在该标签页手动登录 ${siteLabel}`));
+
+    if (siteId === 'gemini') {
+      const boxes = CGR.pickAll(CGR.SEL.generatedImageBox || []);
+      const btns = CGR.pickAll(CGR.SEL.imageDownloadButton || []);
+      out.push(item('geminiImage', 'Gemini 生成图容器 / 全尺寸下载按钮', true,
+        `生成图容器 ${boxes.length} / 下载按钮 ${btns.length}`,
+        '出图后这里仍为 0 表示 Gemini 前端改版，需要更新 src/shared/selectors.js 里的 generatedImageBox / imageDownloadButton'));
+    }
 
     out.push(
       item(
@@ -24,7 +36,7 @@
         '输入框存在',
         !!composer,
         composer ? `命中：${composer.tagName.toLowerCase()}${composer.id ? '#' + composer.id : ''}` : '找不到输入框',
-        'ChatGPT 前端可能已改版，请更新 src/shared/selectors.js 里的 CGR.SEL.composer'
+        '站点前端可能已改版，请更新 src/shared/selectors.js 里该站点的 CGR.SEL.composer'
       )
     );
 
@@ -102,7 +114,7 @@
         '图片识别（URL 规则）',
         true,
         imgHits ? `命中 ${imgHits} 张` : '未命中 URL 白名单（不影响识别，仍会按「新出现的大图」判定）',
-        '出图后这里为 0 表示 ChatGPT 换了图片域名，属于正常，宽松规则会兜住'
+        '出图后这里为 0 表示站点换了图片域名，属于正常，宽松规则会兜住'
       )
     );
     out.push(

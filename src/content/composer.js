@@ -126,7 +126,7 @@
         /* 无效选择器忽略 */
       }
     }
-    return null;
+    return CGR.pick(CGR.SEL.stopButton) || null;
   }
 
   function visibleStopSet() {
@@ -192,7 +192,24 @@
         if (usable) return { btn: usable, total, disabled, excludedStop };
       }
     }
-    return { btn: null, total, disabled, excludedStop };
+    // Gemini 的发送按钮可能挂在 shadow root 里，document.querySelectorAll 看不到。
+    // CGR.pickAll 的 deepFind 会挖 shadow DOM，这里作为最后一层兜底。
+    if (!usable) {
+      for (const b of CGR.pickAll(CGR.SEL.sendButton)) {
+        if (stops.has(b)) {
+          excludedStop += 1;
+          continue;
+        }
+        if (!btnUsable(b)) {
+          disabled += 1;
+          continue;
+        }
+        total += 1;
+        usable = b;
+        break;
+      }
+    }
+    return { btn: usable, total, disabled, excludedStop };
   }
 
   /** 页面当前「能不能发消息」的实况，失败时写进日志供定位 */
@@ -415,8 +432,12 @@
         /* ignore */
       }
     }
-    // 兜底：直接跳转到根路径（会触发页面重载，租约由后台按「刷新」规则回收后重派）
-    location.assign('https://chatgpt.com/');
+    // 兜底：跳到当前站点的新对话首页（会触发页面重载，租约由后台按「刷新」规则回收后重派）。
+    // 站点事实只在 sites.js 定义，别在这里写死 chatgpt.com —— 否则 Gemini 批次会被导航到另一个网站。
+    const home = typeof CGR.siteHome === 'function'
+      ? CGR.siteHome(typeof CGR.currentSiteId === 'function' ? CGR.currentSiteId() : '')
+      : 'https://chatgpt.com/';
+    location.assign(home);
     return false;
   }
 
@@ -428,6 +449,24 @@
     const inputs = Array.from(scope.querySelectorAll('input[type="file"]'));
     if (!inputs.length) return null;
     return inputs.find((i) => i.multiple) || inputs[0];
+  }
+
+  /** Gemini 的 file input 藏在「Upload & tools」菜单里，点开菜单后才会挂到 DOM。
+   * ChatGPT 则一直有隐藏 input，所以这里对两个站点都安全：先查，查不到再点菜单并轮询。 */
+  async function ensureFileInput() {
+    let input = findFileInput();
+    if (input) return input;
+    const menu = CGR.pick(CGR.SEL.uploadMenu || []);
+    if (menu) {
+      try {
+        menu.click();
+      } catch (e) {
+        /* ignore */
+      }
+      const appeared = await CGR.pollUntil(() => !!findFileInput(), 4000, 200);
+      if (appeared) input = findFileInput();
+    }
+    return input;
   }
 
   /** 输入区里已经挂上的附件数量（缩略图 / 文件条）。缩略图可能是 blob: 也可能是签名地址，所以按尺寸过滤图标 */
@@ -444,13 +483,14 @@
   }
 
   /**
-   * 把参考图塞进 ChatGPT 的隐藏 file input，再等缩略图出现。
+   * 把参考图塞进当前站点的隐藏 file input，再等缩略图出现。
+   * Gemini 需要先点开上传菜单才会有 file input，由 ensureFileInput() 处理。
    * 图片数据存在 chrome.storage 的 img:<id> 里（内容脚本可直接读）。
    */
   async function attachImages(refs) {
     if (!refs || !refs.length) return { ok: true, count: 0 };
 
-    const input = findFileInput();
+    const input = await ensureFileInput();
     if (!input) return { ok: false, reason: 'no-file-input' };
 
     const files = [];
@@ -501,6 +541,7 @@
     insertText,
     clearComposer,
     attachImages,
+    ensureFileInput,
     countAttachments,
     attachmentSrcs,
     waitSendable,

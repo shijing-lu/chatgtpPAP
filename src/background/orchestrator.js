@@ -66,13 +66,13 @@
 
   /* ---------------- 批次管理 ---------------- */
 
-  async function createBatch(name) {
+  async function createBatch(name, site) {
     return store.withLock(async () => {
       await store.ensureLoaded();
-      const rec = await store.createBatch(String(name || '').trim() || stampName());
-      store.addLog('info', `新建批次${batchLabel(rec)}`);
+      const rec = await store.createBatch(String(name || '').trim() || stampName(), site);
+      store.addLog('info', `新建批次${batchLabel(rec)}（${CGR.siteLabel(rec.site)}）`);
       await store.publishView();
-      return { ok: true, batch: { id: rec.id, name: rec.name } };
+      return { ok: true, batch: { id: rec.id, name: rec.name, site: rec.site } };
     });
   }
 
@@ -82,6 +82,16 @@
       const b = store.getBatch(id);
       if (!b) return { ok: false, error: '批次不存在' };
       if (patch && typeof patch.name === 'string' && patch.name.trim()) b.name = patch.name.trim();
+      // 工作站点只能在非运行态切换：运行中改站点会让已绑定的执行页与批次不匹配。
+      // 侧边栏每次保存都会把当前站点一起提交，所以只有「真的变了」才拦截，
+      // 否则运行中连改个批次名／下载目录都会被拒。
+      if (patch && patch.site) {
+        const next = store.normalizeSite(patch.site);
+        if (next !== store.normalizeSite(b.site)) {
+          if (b.status === G.RUNNING) return { ok: false, error: '批次运行中不能切换工作站点，请先暂停或停止' };
+          b.site = next;
+        }
+      }
       if (patch && typeof patch.folder === 'string') b.folder = CGR.normalizeFolder(patch.folder, '');
       if (patch && Array.isArray(patch.premises)) b.premises = patch.premises.map((s) => String(s || '').trim()).filter(Boolean);
       if (patch && typeof patch.premiseEnabled === 'boolean') b.premiseEnabled = patch.premiseEnabled;
@@ -89,7 +99,10 @@
       await store.publishView();
       return {
         ok: true,
-        batch: { id: b.id, name: b.name, folder: b.folder, premises: b.premises, premiseEnabled: b.premiseEnabled }
+        batch: {
+          id: b.id, name: b.name, site: b.site, folder: b.folder,
+          premises: b.premises, premiseEnabled: b.premiseEnabled
+        }
       };
     });
   }
@@ -321,6 +334,11 @@
       if (!items.some((it) => it.status === S.PENDING)) return { ok: false, error: '这个批次没有待生成的任务' };
 
       const n = effectiveConcurrency();
+      // 站点在「开始」时锁定：老批次没有 site 字段，回落到默认站点；
+      // 之后 tabpool 只会挑同站点的标签页，claim 也会拒绝跨站点领任务。
+      b.site = store.normalizeSite(b.site);
+      await store.putBatch(b);
+      const siteLabel = CGR.siteLabel(b.site);
       const othersRunning = store.listBatches().some((x) => x.id !== bid && x.status === G.RUNNING);
       const bound = await bindTabs(b, n, !othersRunning, true, true);
 
@@ -328,7 +346,7 @@
       if (!bound.ready.length) {
         b.status = G.ERROR;
         b.startedAt = 0;
-        b.lastError = '没有可接管的 ChatGPT 标签页，请打开或刷新 chatgpt.com 后点「开始」';
+        b.lastError = `没有可接管的 ${siteLabel} 标签页，请打开或刷新 ${siteLabel} 对话页后点「开始」`;
         await store.putBatch(b);
         store.addLog('error', `开始${batchLabel(b)}失败：${bound.dead.length} 个标签页都无法接管`);
         await store.publishView();
@@ -345,7 +363,7 @@
       sendFailStreak = 0;
       await store.putBatch(b);
 
-      store.addLog('info', `开始${batchLabel(b)}，并发 ${n}，已接管标签页：${bound.ready.join(', ')}`);
+      store.addLog('info', `开始${batchLabel(b)}（${siteLabel}），并发 ${n}，已接管标签页：${bound.ready.join(', ')}`);
       for (const id of bound.ready) await tabs.send(id, { type: CGR.MSG.WAKE });
       await store.publishView();
 
@@ -569,11 +587,28 @@
 
   /* ---------------- 租约派发 ---------------- */
 
-  async function claim(tabId, convId) {
+  async function claim(tabId, convId, site) {
     return store.withLock(async () => {
       await store.ensureLoaded();
+      // site 由页面 HELLO / LEASE_REQUEST 上报；缺省时不加站点限制（兼容旧调用点与回归测试）。
+      const pageSite = site || '';
+      const batchSite = (b) => store.normalizeSite(b && b.site);
       let rt = store.getRuntime();
       let bid = ((rt.activeTabs || {})[tabId] || {}).batchId;
+
+      // 页面站点与已绑定批次的站点不一致时，绝不能把另一个网站的提示词发进这个页面。
+      // 「立即修复」或切换工作站点后会重新绑定同类站点的标签页。
+      if (bid && pageSite) {
+        const boundBatch = store.getBatch(bid);
+        if (boundBatch && batchSite(boundBatch) !== pageSite) {
+          return {
+            ok: false,
+            reason: 'site-mismatch',
+            expectedSite: batchSite(boundBatch),
+            actualSite: pageSite
+          };
+        }
+      }
 
       // 兜底：扩展重载 / runtime 归属丢失 / 执行页僵尸化，都别让用户等 30 秒的定时自愈。
       // 只认「恰好一个批次在跑、有待办」，避免用户随手多开的 ChatGPT 标签页一起抢同一批任务。
@@ -585,7 +620,9 @@
       // 一条任务、且没有任务正在执行，就让当前来领任务的标签页接管，并清掉旧绑定。
       if (!bid || !store.getBatch(bid)) {
         const running = store.listBatches().filter(
-          (x) => x.status === G.RUNNING && store.getItems(x.id).some((it) => it.status === S.PENDING)
+          (x) => x.status === G.RUNNING &&
+            (!pageSite || batchSite(x) === pageSite) &&
+            store.getItems(x.id).some((it) => it.status === S.PENDING)
         );
         if (running.length === 1) {
           const target = running[0];
@@ -622,7 +659,8 @@
         return {
           ok: false,
           reason: 'no-batch',
-          activeBatch: runningBatches.length === 1 ? runningBatches[0].name : ''
+          activeBatch: runningBatches.length === 1 ? runningBatches[0].name : '',
+          activeSite: runningBatches.length === 1 ? batchSite(runningBatches[0]) : ''
         };
       }
 
@@ -688,6 +726,7 @@
         ok: true,
         leaseToken: item.lease.token,
         cfg,
+        site: batchSite(b),
         premises: b.premiseEnabled !== false && Array.isArray(b.premises) ? b.premises : [],
         item: {
           index: item.index,
@@ -876,7 +915,7 @@
         const b = store.getBatch(bid);
         if (b) {
           b.status = G.ERROR;
-          b.lastError = 'ChatGPT 未登录或登录已失效，请先在该标签页登录';
+          b.lastError = `${CGR.siteLabel(b.site)} 未登录或登录已失效，请先在该标签页登录`;
           await store.putBatch(b);
         }
         store.addLog('error', '检测到登录失效，任务已中止');
@@ -912,7 +951,8 @@
           kind,
           artifactKind: shape,
           label: best.label || '',
-          click: !!best.click
+          click: !!best.click,
+          siteDownload: !!best.siteDownload
         };
         item.ts = Object.assign({}, item.ts, { imageAt: Date.now() });
         sendFailStreak = 0;
@@ -922,7 +962,16 @@
           await store.putBatch(okBatch);
         }
 
-        if (isBlob) {
+        // Gemini：生成图容器里有「下载全尺寸图片」按钮时优先点它，
+        // 而不是把 blob: 预览图当作成品下载（那条路只能拿到 1024px 缩图）。
+        const batch = store.getBatch(bid);
+        const site = msg.site || data.site || (batch && batch.site) || '';
+        if (best.siteDownload && site === 'gemini') {
+          await finalize(item, S.DOWNLOADING);
+          item.tabId = senderTabId;
+          await store.putItem(bid, item);
+          await dl.startSiteDownload(item, best, senderTabId);
+        } else if (isBlob) {
           await finalize(item, S.DOWNLOADING);
           item.tabId = senderTabId;
           await store.putItem(bid, item);

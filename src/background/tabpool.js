@@ -1,33 +1,54 @@
-/* 标签页池：串行模式复用已有 ChatGPT 标签页；并行模式在独立窗口里开 N 个 runner tab。
+/* 标签页池：复用已打开的对话标签页；并行模式可开 N 个 runner tab。
+ * 站点 URL 事实统一由 sites.js 提供：一个批次只绑定它自己工作站点上的标签页，
+ * 否则 Gemini 批次会抢到 ChatGPT 标签页，表现为「已接管」却永远不发提示词。
  * 注意：不需要 tabs.update({active:true})。DOM focus / execCommand 是 per-document 的，
  * 后台标签页同样有效，强行激活只会抢用户焦点。 */
 (function (root) {
   const CGR = root.CGR;
   const store = root.CGR_STORE;
 
-  const MATCH = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
-  let runnerWindowId = null;
+  const MATCH = typeof CGR.allMatchPatterns === 'function'
+    ? CGR.allMatchPatterns()
+    : ['https://chatgpt.com/*', 'https://chat.openai.com/*', 'https://gemini.google.com/*'];
 
-  async function listTabs() {
+  function defaultSite() {
+    return (CGR.SITE_IDS && CGR.SITE_IDS[0]) || 'chatgpt';
+  }
+
+  function siteHome(site) {
+    return typeof CGR.siteHome === 'function' ? CGR.siteHome(site || defaultSite()) : 'https://chatgpt.com/';
+  }
+
+  function siteOfTab(t) {
+    return typeof CGR.siteOf === 'function' ? CGR.siteOf(t && t.url) : '';
+  }
+
+  function tabMatches(t, site) {
+    if (!t) return false;
+    const s = siteOfTab(t);
+    if (!s) return false;
+    return !site || s === site;
+  }
+
+  async function listTabs(site) {
     try {
-      return await chrome.tabs.query({ url: MATCH });
+      const all = await chrome.tabs.query({ url: MATCH });
+      return (all || []).filter((t) => tabMatches(t, site));
     } catch (e) {
       return [];
     }
   }
 
-  async function usableTabs() {
-    const tabs = await listTabs();
+  async function usableTabs(site) {
+    const tabs = await listTabs(site);
     return tabs.filter((t) => !t.discarded && t.status !== 'unloaded');
   }
 
-  /** 用户此刻正在看的那个 ChatGPT 标签页（侧边栏就附着在它所在的窗口） */
-  async function currentActiveChatTab() {
+  /** 用户此刻正在看的那个对话标签页（侧边栏就附着在它所在的窗口） */
+  async function currentActiveChatTab(site) {
     try {
       const list = await chrome.tabs.query({ active: true, lastFocusedWindow: true, url: MATCH });
-      return (list || []).find(
-        (t) => t && !t.discarded && t.status !== 'unloaded' && /chatgpt\.com|chat\.openai\.com/.test(String(t.url || ''))
-      ) || null;
+      return (list || []).find((t) => tabMatches(t, site) && !t.discarded && t.status !== 'unloaded') || null;
     } catch (e) {
       return null;
     }
@@ -88,7 +109,11 @@
   async function replaceTab(oldTabId) {
     try {
       const t = await chrome.tabs.get(oldTabId);
-      const created = await chrome.tabs.create({ windowId: t.windowId, url: 'https://chatgpt.com/', active: false });
+      const created = await chrome.tabs.create({
+        windowId: t.windowId,
+        url: siteHome(siteOfTab(t) || defaultSite()),
+        active: false
+      });
       try {
         await chrome.tabs.remove(oldTabId);
       } catch (e) {
@@ -140,6 +165,8 @@
    */
   async function ensureBatchTabs(batch, desired, focus, preferActive) {
     const want = Math.max(1, Math.min(desired || 1, CGR.LIMITS.hardMaxConcurrency));
+    // 老批次没有 site 字段，按 ChatGPT 处理；新建批次在批次设置里指定工作站点。
+    const site = (batch && batch.site) || defaultSite();
     const rt = store.getRuntime();
 
     // ① 这个批次已经登记过的标签页，只要还活着就继续用
@@ -152,7 +179,7 @@
     for (const id of mine) {
       try {
         const t = await chrome.tabs.get(id);
-        if (t && /chatgpt\.com|chat\.openai\.com/.test(String(t.url || ''))) {
+        if (tabMatches(t, site)) {
           live.push(t.id);
           if (windowId == null) windowId = t.windowId;
         }
@@ -166,7 +193,7 @@
     // 用户看到的就是「说在跑，但当前页面毫无动静」。这里只换选谁当执行页，
     // 不激活标签页、也不新建窗口。
     if (preferActive) {
-      const here = await currentActiveChatTab();
+      const here = await currentActiveChatTab(site);
       if (here && !live.includes(here.id)) {
         live.unshift(here.id);
         if (windowId == null) windowId = here.windowId;
@@ -179,8 +206,8 @@
       return { ids: picked, windowId };
     }
 
-    // ② 复用用户已经打开、且没被别的批次占用的 ChatGPT 标签页（优先当前活动的那个）
-    const all = await chrome.tabs.query({ url: MATCH });
+    // ② 复用用户已经打开、站点一致、且没被别的批次占用的标签页（优先当前活动的那个）
+    const all = await listTabs(site);
     // 只有「其它批次此刻仍在运行」才算真的占用这个标签页。
     // 旧批次已经停止/完成/空闲时，它的历史归属不该挡路，否则换一个批次点「开始」
     // 就会误判成没有可用标签页，转头新建一个 —— 用户看到的「又开新标签页」多半来自这里。
@@ -206,7 +233,7 @@
 
     // ③ 还不够才新建标签页（建在同一个窗口里，不另开窗口）
     for (let i = live.length; i < want; i++) {
-      const opts = { url: 'https://chatgpt.com/', active: false };
+      const opts = { url: siteHome(site), active: false };
       if (windowId != null) opts.windowId = windowId;
       const t = await chrome.tabs.create(opts);
       live.push(t.id);
@@ -230,5 +257,21 @@
     }
   }
 
-  root.CGR_TABS = { listTabs, usableTabs, currentActiveChatTab, ensureBatchTabs, resetWindow, send, ping, pageAlive, reviveTab, replaceTab, ensureContentScript };
+  root.CGR_TABS = {
+    MATCH,
+    siteOfTab,
+    tabMatches,
+    siteHome,
+    listTabs,
+    usableTabs,
+    currentActiveChatTab,
+    ensureBatchTabs,
+    resetWindow,
+    send,
+    ping,
+    pageAlive,
+    reviveTab,
+    replaceTab,
+    ensureContentScript
+  };
 })(typeof globalThis !== 'undefined' ? globalThis : self);

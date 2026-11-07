@@ -337,12 +337,16 @@
     const item = store.getItem(p.batchId, p.index);
     if (item && item.status === CGR.STATUS.DOWNLOADING) {
       item.status = CGR.STATUS.NEEDS_REVIEW;
+      const tier = item.download && item.download.tier;
+      const isSite = tier === 'D';
       item.error = {
-        code: 'ATTACHMENT_CLICK_TIMEOUT',
-        message: '页面上已有图片文件，但点击附件后没有产生下载；请手动保存或检查下载权限'
+        code: isSite ? 'SITE_DOWNLOAD_CLICK_TIMEOUT' : 'ATTACHMENT_CLICK_TIMEOUT',
+        message: isSite
+          ? '站点全尺寸下载按钮点了没产生下载；请手动保存或检查下载权限'
+          : '页面上已有图片文件，但点击附件后没有产生下载；请手动保存或检查下载权限'
       };
       await store.putItem(p.batchId, item);
-      store.addLog('error', `#${p.index + 1} 附件点击未产生下载，已标记待确认（不重发提示词）`, { index: p.index });
+      store.addLog('error', `#${p.index + 1} ${isSite ? '全尺寸下载按钮' : '附件点击'}未产生下载，已标记待确认（不重发提示词）`, { index: p.index });
     }
   }
 
@@ -366,6 +370,42 @@
     item.download = Object.assign({}, item.download, { tier: 'C', state: 'pending', filename: item.filename });
     await store.putItem(item.batchId, item);
     await requestFallback(item, 'file-artifact', { label: art.label, click: true });
+    return item;
+  }
+
+  /** D 级：点站点自带的「下载全尺寸图片」按钮（Gemini）。
+   * 页面里显示的是 blob: 预览，取流只能拿到缩图；按钮产生的下载由
+   * onDeterminingFilename 用 pendingClick 里的目标文件名归位到批次目录。
+   * 和 C 级一样有 45 秒看门狗：点了没下载就标「待确认」，绝不重发生图。 */
+  async function startSiteDownload(item, art, tabId) {
+    const ext = artifactExt(art) || 'png';
+    const pending = await armClick(item, ext, art);
+    item.download = Object.assign({}, item.download, {
+      tier: 'D', state: 'pending', filename: pending.filename, siteDownload: true
+    });
+    await store.putItem(item.batchId, item);
+    if (tabId == null) {
+      item.status = CGR.STATUS.NEEDS_REVIEW;
+      item.error = { code: 'NO_TAB_FOR_SITE_DOWNLOAD', message: '图片已生成但找不到执行标签页，请手动保存' };
+      await store.putItem(item.batchId, item);
+      return item;
+    }
+    try {
+      await chrome.tabs.sendMessage(tabId, {
+        type: CGR.MSG.CLICK_SITE_DOWNLOAD,
+        index: item.index,
+        batchId: item.batchId,
+        src: (art && art.src) || '',
+        label: (art && (art.downloadLabel || art.label)) || '',
+        filename: pending.filename
+      });
+      store.addLog('info', `#${item.index + 1} 已请求${CGR.siteLabel ? CGR.siteLabel('gemini') : '站点'}全尺寸下载 → ${pending.filename}`, { index: item.index });
+    } catch (e) {
+      item.status = CGR.STATUS.NEEDS_REVIEW;
+      item.error = { code: 'SITE_DOWNLOAD_UNREACHABLE', message: '全尺寸下载按钮无法触发，图片已生成请手动保存' };
+      store.addLog('error', `#${item.index + 1} 站点下载按钮触发失败：${String((e && e.message) || e)}`, { index: item.index });
+      await store.putItem(item.batchId, item);
+    }
     return item;
   }
 
@@ -574,6 +614,7 @@
     startUrlDownload,
     startDataDownload,
     startFileDownload,
+    startSiteDownload,
     requestFallback,
     onDeterminingFilename,
     checkPendingClicks,

@@ -1,14 +1,16 @@
 {
   "manifest_version": 3,
-  "name": "ChatGPT 批量生图助手",
-  "version": "0.5.3",
-  "description": "把一批提示词交给 ChatGPT 官网逐条生图，自动检测完成并下载到指定文件夹。",
+  "name": "批量生图助手 · ChatGPT / Gemini",
+  "version": "0.6.0",
+  "description": "把一批提示词交给 ChatGPT 或 Gemini 官网逐条生图，自动检测完成并下载到指定文件夹。",
   "minimum_chrome_version": "114",
   "permissions": ["storage", "unlimitedStorage", "downloads", "tabs", "alarms", "sidePanel", "scripting"],
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://chat.openai.com/*",
-    "https://*.oaiusercontent.com/*"
+    "https://*.oaiusercontent.com/*",
+    "https://gemini.google.com/*",
+    "https://*.googleusercontent.com/*"
   ],
   "background": {
     "service_worker": "src/background/service-worker.js"
@@ -17,7 +19,7 @@
     "default_path": "src/sidepanel/sidepanel.html"
   },
   "action": {
-    "default_title": "ChatGPT 批量生图助手",
+    "default_title": "批量生图助手 · ChatGPT / Gemini",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",
@@ -33,9 +35,14 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*",
+        "https://gemini.google.com/*"
+      ],
       "js": [
         "src/shared/constants.js",
+        "src/shared/sites.js",
         "src/shared/selectors.js",
         "src/shared/slug.js",
         "src/shared/sched.js",
