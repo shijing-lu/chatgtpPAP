@@ -21,6 +21,18 @@
     return tabs.filter((t) => !t.discarded && t.status !== 'unloaded');
   }
 
+  /** 用户此刻正在看的那个 ChatGPT 标签页（侧边栏就附着在它所在的窗口） */
+  async function currentActiveChatTab() {
+    try {
+      const list = await chrome.tabs.query({ active: true, lastFocusedWindow: true, url: MATCH });
+      return (list || []).find(
+        (t) => t && !t.discarded && t.status !== 'unloaded' && /chatgpt\.com|chat\.openai\.com/.test(String(t.url || ''))
+      ) || null;
+    } catch (e) {
+      return null;
+    }
+  }
+
   async function harden(tabId) {
     try {
       await chrome.tabs.update(tabId, { autoDiscardable: false });
@@ -126,7 +138,7 @@
    * 为批次准备执行标签页：优先复用你已经开着的 ChatGPT 标签页，
    * 不再动不动就新建窗口。只有确实没有可用标签页时才新建一个。
    */
-  async function ensureBatchTabs(batch, desired, focus) {
+  async function ensureBatchTabs(batch, desired, focus, preferActive) {
     const want = Math.max(1, Math.min(desired || 1, CGR.LIMITS.hardMaxConcurrency));
     const rt = store.getRuntime();
 
@@ -146,6 +158,18 @@
         }
       } catch (e) {
         /* 已关闭 */
+      }
+    }
+
+    // 手动「开始 / 立即修复」时优先用用户此刻正在看的 ChatGPT 标签页。
+    // 旧版只复用 mine（上次运行遗留的登记），常常选中一个后台/已冻结的标签页，
+    // 用户看到的就是「说在跑，但当前页面毫无动静」。这里只换选谁当执行页，
+    // 不激活标签页、也不新建窗口。
+    if (preferActive) {
+      const here = await currentActiveChatTab();
+      if (here && !live.includes(here.id)) {
+        live.unshift(here.id);
+        if (windowId == null) windowId = here.windowId;
       }
     }
 
@@ -206,5 +230,5 @@
     }
   }
 
-  root.CGR_TABS = { listTabs, usableTabs, ensureBatchTabs, resetWindow, send, ping, pageAlive, reviveTab, replaceTab, ensureContentScript };
+  root.CGR_TABS = { listTabs, usableTabs, currentActiveChatTab, ensureBatchTabs, resetWindow, send, ping, pageAlive, reviveTab, replaceTab, ensureContentScript };
 })(typeof globalThis !== 'undefined' ? globalThis : self);

@@ -152,6 +152,10 @@
     // service worker 运行期唤醒检查间隔；只在批次确实卡住时才发 WAKE
     wakeTickMs: 5000,
     wakeStuckMs: 15000,
+    // 执行页「占着绑定却不来领任务」的判定：超过这么久没有成功派发、也没有任务在执行，
+    // 就允许其它正在轮询的 ChatGPT 标签页就地接管。实际阈值还会按配置的间隔上限放宽，
+    // 避免把两条任务之间的正常等待误判成失联。
+    claimTakeoverMs: 10000,
     maxLogs: 400
   };
 })(typeof globalThis !== 'undefined' ? globalThis : self);

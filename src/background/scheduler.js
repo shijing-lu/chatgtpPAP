@@ -50,7 +50,9 @@
         try {
           const res = await CGR.withTimeout(tabs.send(id, { type: CGR.MSG.PING }), 5000, null);
           if (res && res.ok) {
-            alive[id] = rt.activeTabs[id];
+            // 之前被标过 stale 的标签页一旦重新响应，必须清掉标记，
+            // 否则它会永久被当成失联执行页（claim 的接管判断也依赖这个标记）。
+            alive[id] = Object.assign({}, rt.activeTabs[id], { stale: false });
             misses.delete(id);
             await lease.renewByTab(id);
             await CGR.withTimeout(tabs.send(id, { type: CGR.MSG.EVALUATE }), 5000, null);

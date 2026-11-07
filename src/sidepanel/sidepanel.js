@@ -347,7 +347,7 @@
     if (stuck) {
       $('stuckText').textContent = noTabs
         ? `批次「${c.name}」显示运行中，但没有绑定任何 ChatGPT 标签页（常见于扩展重载后）。点「立即修复」复用当前标签页重新接管，不会新开窗口。`
-        : `批次「${c.name}」已开始 ${Math.round(idleFor / 1000)} 秒仍没有页面来领任务，点「立即修复」重新接管；后台也会自动重试。`;
+        : `批次「${c.name}」的执行页 ${Math.round(idleFor / 1000)} 秒没来领任务，其它 ChatGPT 标签页会自动接管；也可点「立即修复」让当前页直接接管。`;
     }
   }
 

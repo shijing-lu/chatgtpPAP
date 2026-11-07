@@ -326,11 +326,11 @@
           error: '批次处于异常状态，需要处理',
           'limit_waiting': '限额冷却中',
           finished: '批次已完成',
-          'no-batch': '这个标签页未绑定批次（多标签页时以执行页为准）',
+          'no-batch': '这个标签页不是执行页（执行页长时间没来领任务时会自动接管）',
           'conv-conflict': '与另一个标签页抢同一个对话',
           'no-response': '后台无响应（扩展可能正在重启）'
         }[reason] || reason;
-        const extra = reason === 'no-batch' && grant && grant.activeBatch ? `（「${grant.activeBatch}」在另一个标签页执行）` : '';
+        const extra = reason === 'no-batch' && grant && grant.activeBatch ? `（「${grant.activeBatch}」当前绑定在另一个标签页）` : '';
         send({ type: MSG.LOG, level: 'info', message: `等待派发：${label}${extra}` });
       }
       await waitForWork(idleWait);

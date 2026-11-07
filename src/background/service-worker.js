@@ -105,7 +105,21 @@ async function wakeTick() {
       await store.withLock(() => orch.rebindBatch(b.id));
       continue;
     }
-    for (const id of ids) await tabs.send(id, { type: CGR.MSG.WAKE });
+    for (const id of ids) {
+      const res = await CGR.withTimeout(tabs.send(id, { type: CGR.MSG.WAKE }), 2000, null);
+      if (res && res.ok) continue;
+      // 唤醒都送不到，说明这个「执行页」已经不干活了。立刻标成失联，
+      // 让其它正在轮询的 ChatGPT 标签页在 claim 里就地接管，不用等 30 秒定时扫描。
+      await store.withLock(async () => {
+        const cur = store.getRuntime();
+        const activeTabs = Object.assign({}, cur.activeTabs);
+        const info = activeTabs[id];
+        if (!info) return;
+        activeTabs[id] = Object.assign({}, info, { stale: true });
+        await store.setRuntime({ activeTabs });
+      });
+      store.addLog('warn', `执行页 ${id} 没有响应唤醒，已标记失联；其它 ChatGPT 标签页会自动接管`);
+    }
   }
 }
 
@@ -333,6 +347,18 @@ async function handleCommand(msg) {
         candidates = list.slice().sort((a, b) => (b.active ? 1 : 0) - (a.active ? 1 : 0)).slice(0, 1);
       }
 
+      // 僵尸执行页常常 PING 得通、却根本不来领任务，只「修」它等于没修。
+      // 指定批次时优先把用户当前正在看的 ChatGPT 标签页纳为执行页；
+      // 数量严格按并发设置截断，避免一次修复后冒出两个执行页并行生图。
+      if (targetBatch) {
+        const here = await tabs.currentActiveChatTab();
+        const cfg = store.getCfg();
+        const want = cfg.mode === CGR.MODE.PARALLEL
+          ? Math.max(1, Math.min(cfg.concurrency || 1, CGR.LIMITS.maxConcurrency))
+          : 1;
+        candidates = here ? [here, ...candidates.filter((t) => t.id !== here.id)].slice(0, want) : candidates.slice(0, want);
+      }
+
       const fixed = [];
       for (const t of candidates) {
         if (await tabs.ensureContentScript(t.id)) fixed.push(t.id);
@@ -342,6 +368,13 @@ async function handleCommand(msg) {
       await store.withLock(async () => {
         const cur = store.getRuntime();
         const activeTabs = Object.assign({}, cur.activeTabs);
+        // 清掉同批次里这次没修好的其它绑定，别让它们继续占着执行页名额
+        if (targetBatch) {
+          const keep = new Set(fixed);
+          for (const [tid, info] of Object.entries(activeTabs)) {
+            if (info && info.batchId === targetBatch && !keep.has(Number(tid))) delete activeTabs[tid];
+          }
+        }
         for (const id of fixed) {
           activeTabs[id] = Object.assign({}, activeTabs[id], {
             batchId: targetBatch || (activeTabs[id] && activeTabs[id].batchId) || '',

@@ -266,11 +266,17 @@
    * 给批次绑定执行标签页并接管页面（优先复用当前 ChatGPT 标签页）。
    * 不加锁：调用方必须已经持有 store.withLock，否则与 scan/claim 会互相踩。
    */
-  async function bindTabs(b, desired, focus, switchSelection) {
-    const secured = await tabs.ensureBatchTabs(b, desired, focus);
+  async function bindTabs(b, desired, focus, switchSelection, preferActive) {
+    const secured = await tabs.ensureBatchTabs(b, desired, focus, preferActive);
 
     const rt = store.getRuntime();
     const activeTabs = Object.assign({}, rt.activeTabs);
+    const picked = secured.ids.map(String);
+    // 清掉本批次残留的其它绑定。上次运行留下的后台标签页会一直占着「执行页」名额，
+    // 让 claim 误以为还有人在领任务，其它标签页全被 no-batch 拒绝。
+    for (const [tid, info] of Object.entries(activeTabs)) {
+      if (info && info.batchId === b.id && !picked.includes(String(tid))) delete activeTabs[tid];
+    }
     for (const id of secured.ids) {
       activeTabs[id] = Object.assign({}, activeTabs[id], {
         batchId: b.id, state: 'idle', stale: false, at: Date.now()
@@ -316,7 +322,7 @@
 
       const n = effectiveConcurrency();
       const othersRunning = store.listBatches().some((x) => x.id !== bid && x.status === G.RUNNING);
-      const bound = await bindTabs(b, n, !othersRunning, true);
+      const bound = await bindTabs(b, n, !othersRunning, true, true);
 
       // 一个标签页都接管不了时，绝不能把状态留在「运行中」——那就是「点了开始永远没反应」。
       if (!bound.ready.length) {
@@ -357,7 +363,7 @@
   async function rebindBatch(bid) {
     const b = store.getBatch(bid);
     if (!b || b.status !== G.RUNNING) return { ok: false, reason: 'not-running' };
-    const bound = await bindTabs(b, effectiveConcurrency(), false, false);
+    const bound = await bindTabs(b, effectiveConcurrency(), false, false, true);
     if (!bound.ready.length) return { ok: false, reason: 'no-tab' };
     b.lastClaimAt = 0;
     await store.putBatch(b);
@@ -567,9 +573,14 @@
       let rt = store.getRuntime();
       let bid = ((rt.activeTabs || {})[tabId] || {}).batchId;
 
-      // 兜底：扩展重载 / runtime 归属丢失后，别让这个标签页干等 30 秒的定时自愈。
-      // 只在「恰好一个批次在跑、有待办，且原有绑定都不活跃」时就地补绑定，
-      // 避免用户随手多开的 ChatGPT 标签页一起抢同一批任务。
+      // 兜底：扩展重载 / runtime 归属丢失 / 执行页僵尸化，都别让用户等 30 秒的定时自愈。
+      // 只认「恰好一个批次在跑、有待办」，避免用户随手多开的 ChatGPT 标签页一起抢同一批任务。
+      //
+      // 关键：以前只判断「activeTabs 里有没有 stale:false 的绑定」。那只是 storage 里的一个标记，
+      // 绑定着的页面可能早就不来领任务了（停在错误页、脚本失效、后台被冻结、卡在 HELLO）。
+      // 这时其它标签页来领任务全被 no-batch 拒绝，后台又只给那个死页发 WAKE —— 表现就是
+      // 「已接管标签页 xxx」之后一直「等待派发」。改成按真实进度判定：超过正常间隔还没派发出
+      // 一条任务、且没有任务正在执行，就让当前来领任务的标签页接管，并清掉旧绑定。
       if (!bid || !store.getBatch(bid)) {
         const running = store.listBatches().filter(
           (x) => x.status === G.RUNNING && store.getItems(x.id).some((it) => it.status === S.PENDING)
@@ -578,16 +589,29 @@
           const target = running[0];
           const bound = Object.entries(rt.activeTabs || {}).filter(([, v]) => v && v.batchId === target.id);
           const live = bound.filter(([, v]) => !v.stale);
-          if (!live.length) {
+          const items = store.getItems(target.id);
+          const hasActive = items.some((it) => lease.ACTIVE.includes(it.status));
+          // 两条任务之间本来就会等 maxDelayMs，再加一次页面轮询；低于这个时间绝不抢执行权。
+          const cfgNow = store.getCfg();
+          const takeoverMs = Math.max(
+            CGR.LIMITS.claimTakeoverMs,
+            (cfgNow.maxDelayMs || 7000) + CGR.LIMITS.idlePollMs
+          );
+          const quietFor = Date.now() - (target.lastClaimAt || target.startedAt || 0);
+          const zombie = live.length > 0 && !hasActive && quietFor > takeoverMs;
+
+          if (!live.length || zombie) {
             const activeTabs = Object.assign({}, rt.activeTabs);
-            // 清掉失效归属，避免它继续占着位置让后台误以为还有执行器
+            // 清掉失效归属：既避免它继续占位，也避免新旧两个执行页同时领任务
             for (const [tid] of bound) delete activeTabs[tid];
             activeTabs[tabId] = Object.assign({}, activeTabs[tabId], {
               batchId: target.id, state: 'idle', stale: false, at: Date.now()
             });
             await store.setRuntime({ activeTabs });
             bid = target.id;
-            store.addLog('info', `标签页 ${tabId} 未登记（原有绑定已失联），已自动归到${batchLabel(target)}继续执行`);
+            store.addLog('info', zombie
+              ? `执行页 ${bound.map(([tid]) => tid).join(', ')} 已 ${Math.round(quietFor / 1000)} 秒没来领任务，改由当前标签页 ${tabId} 接管${batchLabel(target)}（旧绑定已清除）`
+              : `标签页 ${tabId} 未登记（原有绑定已失联），已自动归到${batchLabel(target)}继续执行`);
           }
         }
       }
