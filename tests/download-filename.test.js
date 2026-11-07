@@ -143,9 +143,9 @@ async function reset(opts) {
   b.folder = o.folder === undefined ? CGR.normalizeFolder('操作系统第12', '') : o.folder;
   await store.putBatch(b);
   const item = {
-    index: 0,
+    index: o.index == null ? 0 : o.index,
     batchId: b.id,
-    prompt: '画一张静态链表对比图',
+    prompt: o.prompt || '画一张静态链表对比图',
     status: S.PENDING,
     attempt: 0,
     lease: null,
@@ -319,7 +319,31 @@ function capture() {
   );
   console.log('PASS N: 路径被改错时日志明确报出实际路径');
 
-  console.log('\nALL PASS — 下载命名与目录回归通过（14 组）');
+  /* O: 提示词自带编号时，文件名只用它，不能再叠队列序号（用户反馈 037_36_xxx） */
+  ctx = await reset({ index: 36, prompt: '## 36 死锁检测资源分配图与检测算法' });
+  assert.strictEqual(
+    dl.buildPath(ctx.item, 'png'),
+    '操作系统第12/036_死锁检测资源分配图与检测算法.png',
+    '队列第 37 条 + 提示词编号 36 → 只能出现一个编号，且必须是提示词里的 36'
+  );
+  console.log('PASS O: 提示词编号接管文件名，不再出现 037_36_ 双编号');
+
+  /* P: `## 01 | 标题` 这种写法同样只保留一个编号 */
+  ctx = await reset({ index: 0, prompt: '## 01 | 操作系统的基本概念' });
+  assert.strictEqual(dl.buildPath(ctx.item, 'png'), '操作系统第12/001_操作系统的基本概念.png');
+  console.log('PASS P: markdown 编号（## 01 |）被正确解析并去重');
+
+  /* Q: 提示词没有编号 → 继续用队列序号，行为不变 */
+  ctx = await reset({ index: 1, prompt: '画一张静态链表对比图' });
+  assert.strictEqual(dl.buildPath(ctx.item, 'png'), '操作系统第12/002_画一张静态链表对比图.png');
+  console.log('PASS Q: 无编号提示词仍用队列序号，不误伤');
+
+  /* R: 模板本身不含 {index} 时，slug 保留提示词编号，仍然只有一个编号 */
+  ctx = await reset({ index: 36, prompt: '36_死锁检测资源分配图', template: '{slug}' });
+  assert.strictEqual(dl.buildPath(ctx.item, 'png'), '操作系统第12/36_死锁检测资源分配图.png');
+  console.log('PASS R: 自定义模板不含 {index} 时保留原编号，不丢编号也不重复');
+
+  console.log('\nALL PASS — 下载命名与目录回归通过（18 组）');
 })().catch((e) => {
   console.error(e);
   process.exitCode = 1;

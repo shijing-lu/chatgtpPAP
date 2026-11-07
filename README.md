@@ -152,6 +152,7 @@
 - **只能写到「下载目录」下面**。Chrome 扩展无权写入 `D://我的图//` 这种绝对路径
 - **务必关掉 Chrome 设置里的「下载前询问每个文件的保存位置」**，否则每张图都弹一次另存为
 - 文件名模板支持：`{index}`、`{index:03}`、`{slug}`、`{date}`、`{time}`、`{batch}`；中文原样保留
+- **提示词自带编号时，文件名只用那个编号**：`## 36 死锁检测…`、`[36]`、`（36）`、`36.`、`36、`、`36_标题` 都能识别，`{index}` 直接取 36 并把这段从 slug 里切掉，输出 `036_死锁检测….png`；不会再拼成 `037_36_死锁检测…`（两个编号还互相不一样）。提示词没有编号时仍用队列序号。模板里不含 `{index}` 时 slug 保留原编号，一样只有一个编号。改这段前先跑 `tests/download-filename.test.js`
 - **批次名称/下载子目录改完必须点「保存批次设置」**。队列页现在会直接显示「实际保存位置：系统下载目录 / xxx / 001_xxx.png」，有未保存修改也会提示，照着核对即可
 - **一次生成多张图时默认只下载第一张**：产物按页面真实位置排序，取最靠前那张；第一张加载慢或重渲染时短暂消失都不会换图。日志会写「共 N 张，只下载第 1 张」。改这段前先跑 `tests/multi-image.test.js`
 - **文件名不是靠 `downloads.download({filename})` 生效的**：只要扩展注册了 `onDeterminingFilename`（本扩展为了给附件卡片归位必须注册），Chrome 就会忽略传给 `download()` 的 filename（Chromium issue 579563）。所以 `downloads.js` 里维护一张「下载意图表」，三类下载都先登记目标路径，再在同一个监听器里同步 `suggest({filename})` 写回去；表同时写进 storage，SW 冷启动也能恢复。改这段前先跑 `tests/download-filename.test.js`
@@ -292,7 +293,7 @@ tests/
   attachment-download.test.js  附件下载归位与结果护栏回归（真实 downloads 模块）
   version.test.js              版本号与更新记录回归（发版一致性 / 升级 / 重载 / 展示）
   zombie-tab.test.js           僵尸执行页回归（超时自动接管 / 不重复生图 / 当前页优先 / 唤醒失联）
-  download-filename.test.js    下载命名与目录回归（意图表 / 自己发起的下载 / 冷启动恢复 / 路径自检）
+  download-filename.test.js    下载命名与目录回归（意图表 / 自己发起的下载 / 冷启动恢复 / 提示词编号去重）
   multi-image.test.js          多图只下载第一张回归（页面顺序 / 首图稳定 / 单次下载 / 策略切换）
   site-adapter.test.js         Gemini 站点适配回归（站点识别 / 选择器合并 / 标签页隔离 / 全尺寸下载 / 复制原文）
   prompt-copy.test.js          队列提示词复制回归（完整原文 / 选中顺序 / 剪贴板兜底）
@@ -301,7 +302,7 @@ tests/
   stall-watchdog.test.js       任务停摆回归（单条看门狗 / 重试耗尽收尾 / 失败计数清零）
 ```
 
-十七个测试都是零依赖，直接 `node tests/xxx.test.js`（共 174 组）：
+十七个测试都是零依赖，直接 `node tests/xxx.test.js`（共 178 组）：
 
 - `scheduling.test.js`：真实 store / lease / orchestrator / scheduler + Chrome API 桩，覆盖标签页复用、假运行中、扫描异常、自动重绑、归属丢失、空闲轮询写入、运行期唤醒。
 - `image-detection.test.js`：真实 `probes.js` / `watcher.js` + 可控 DOM 与时钟，覆盖图片 URL 改版、尺寸误杀、签名 URL 变化、图片晚到、停止按钮失效、残留 toast 误报、参考图排除、页面卡在生成中时提前收敛成 `PAGE_STALE`、流式慢生成不被误判。
@@ -313,7 +314,7 @@ tests/
 - `attachment-download.test.js`：真实 store / lease / downloads / orchestrator，覆盖卡片取流与点击、`onDeterminingFilename` 归位到批次目录、下载完成推进为已完成、http 直链仍走 A、已有产物时 NO_IMAGE 不重发、点击超时收敛。
 - `version.test.js`：真实 `version.js`，强制 `manifest.version` 与 `RELEASES` 最新一条一致（发版漏写更新说明会直接失败），覆盖说明结构、版本倒序、脚本清单引入、首次安装 / 升级 / 同版本重载 / 历史上限 / 展示与复制文本。
 - `zombie-tab.test.js`：真实后台模块 + 可过滤的标签页桩，覆盖「执行页占着绑定却不来领任务」→ 当前页自动接管并清旧绑定、未超时不抢、有任务在生成时不接管、多批次不抢、接管后旧页不会并行领任务、开始优先当前激活页、WAKE 失败标失联、定时扫描清 stale、立即修复改用当前页，以及 **4 分钟长任务刚结束、页面仍在通信时绝不误判僵尸**（v0.6.2 根因回归）。
-- `download-filename.test.js`：真实 store / slug / downloads + Chrome API 桩，覆盖批次子目录与模板名、直链与 data URL 下载都登记意图、扩展自己发起的下载也被 `suggest` 改名（旧版在这里退化成「下载.png」）、别的扩展与无关下载不干预、SW 冷启动 `restore()` 与异步恢复、失败/重置清理意图、附件点击归位、落盘路径不符时日志报警。
+- `download-filename.test.js`：真实 store / slug / downloads + Chrome API 桩，覆盖批次子目录与模板名、直链与 data URL 下载都登记意图、扩展自己发起的下载也被 `suggest` 改名（旧版在这里退化成「下载.png」）、别的扩展与无关下载不干预、SW 冷启动 `restore()` 与异步恢复、失败/重置清理意图、附件点击归位、落盘路径不符时日志报警、提示词自带编号时文件名只出现一个编号（`## 36` / `## 01 |` / 无编号 / 模板不含 `{index}` 四种）。
 - `multi-image.test.js`：真实 `probes.js` / `watcher.js` / 后台 orchestrator + 可控 DOM 与时钟桩，覆盖产物跨类型按页面位置排序、上报前剥离 DOM 节点、4 张图首图正确、第一张晚加载不被顶替、重渲染首图消失仍补回、默认只发起一次下载且下载第一张、切到 `best` 回到旧评分策略、无 `order` 旧数据兼容。
 - `site-adapter.test.js`：真实 sites / selectors / store / tabpool / orchestrator / downloads + Chrome API 桩，覆盖两个站点的 URL 与对话 ID 解析、Gemini 候选链优先、脚本清单同步、Gemini 批次绝不复用 ChatGPT 标签页、跨站点 `claim` 被拒（`site-mismatch`）、运行中只改名字不被站点校验误拦、全尺寸下载按钮走 D 级且仍归位到批次目录、`GET_PROMPTS` 拿到完整原文而视图只有 240 字。
 - `prompt-copy.test.js`：真实 `prompt-copy.js`，覆盖两种条目结构、长提示词与换行不丢失、勾选顺序不影响输出顺序、编号与自定义分隔符、空输入、Clipboard API 与 `execCommand` 两级写入及失败返回 false。
@@ -338,6 +339,7 @@ tests/
 12. **下载阶段没有租约，就必须有自己的看门狗**：`DOWNLOADING` 属于 `lease.ACTIVE`，但进入下载时刻意清掉了 `lease`（避免被过期清扫误判成「执行超时」），于是 `sweepExpired()` 完全管不到它。取流失败、丢分片、页面点击没产生下载时，一条任务会永远挂在 ACTIVE，整批队列看起来「还在跑」却不再派发。所有下载分支都要写 `download.state / startedAt / tabId`，由 `wakeTick` 每 5 秒跑 `checkPendingClicks()` + `checkPendingFetches()` 收敛；收敛一律标「待确认」并提示手动保存，**绝不重发提示词**。另外分片必须校验 `received === total` 才能 `commitChunks()`，否则会保存一个打不开的损坏文件。改这段前先跑 `tests/download-recovery.test.js`。
 13. **降级取流必须始终拿得到执行页**：A 级直链由浏览器进程发起，不带页面会话态，签名 URL 被 403 / 过期是常态，所以「直链失败 → 页面内取流」是主路径而非异常处理。`startUrlDownload()` 清 `lease` 时绝不能连 `item.tabId` 一起丢，`requestFallback()` 还要能从 `item / download / runtime.activeTabs` 三处兜底找回执行页。4K 大图不要拼 `data:` URL（Chrome 有长度上限），改在页面里用 `blob:` + `<a download>` 点击，点击前先 `armBlobClick()` 登记归位目标，仍由 `onDeterminingFilename` 写回批次目录。改这段前先跑 `tests/download-recovery.test.js` 与 `tests/download-filename.test.js`。
 14. **租约会被心跳无限续期，所以必须有「任务总时长」看门狗**：页面每 20 秒发一次心跳，`sweepExpired()` 只处理**已过期**租约，对一条卡在 `GENERATING / DOWNLOADING` 的任务永远不生效；而 `scan()` 的自愈遇到 `anyActive` 直接跳过。两者叠加就是「批次运行中，却再也不发下一条」——v0.6.3 修的真实故障。`lease.sweepStuck()` 按 `max(lease.acquiredAt, ts.sentAt, download.startedAt)` 计龄，超过 `itemDeadlineMs`（默认 10 分钟，随 `timeoutMs` 放宽）强制收敛：**已发过提示词的一律转「待确认」、attempt 不变**（绝不重发），未发出的退回队列；收敛后必须 `wakeBatch()` 让队列继续。配套的 `normalizeExhausted()` 负责把「重试次数用尽却仍是 PENDING」的条目转「待确认」，否则 `findClaimable` 静默跳过它们、`maybeFinish` 永远认为还有剩余，批次会永远挂着。改这段前先跑 `tests/stall-watchdog.test.js`。
+15. **文件名里的编号只能有一个来源**：`buildPath()` 的 `{index}` 默认取队列序号（`item.index + 1`），但提示词本身常带编号（`## 36 标题`、`[36]`、`36_标题`），`slug()` 会把它原样留下 → 拼出 `037_36_标题`，两个编号还互相不一样。所以模板含 `{index}` 时必须用 `CGR.leadingIndex()` 解析出的提示词编号作为 `{index}`，并把这段前缀从 slug 里切掉；模板不含 `{index}` 时保留 slug 原编号。识别要求数字后面有分隔符（空格、`.`、`、`、`：`、`|`、`_`、`-`）或成对括号，避免把「10张海报」误判成编号。改这段前先跑 `tests/download-filename.test.js`。
 
 ## 十、版本与发版规范
 

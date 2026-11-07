@@ -46,9 +46,17 @@
     const cfg = store.getCfg();
     const batch = store.getBatch(item.batchId);
     const dir = store.resolveFolder(batch);
-    const slug = CGR.slug(item.prompt, 40);
-    const name = CGR.renderName(cfg.template || '{index:03}_{slug}', {
-      index: item.index + 1,
+    const tpl = cfg.template || '{index:03}_{slug}';
+    // 提示词自带编号（`## 36 …` / `[36]` / `36、` …）时，文件名就用它，
+    // 并把这段编号从 slug 里切掉。否则会拼出「037_36_标题」——两个编号还互相不一样，
+    // 用户按文件名对不上自己的提示词清单。
+    const lead = typeof CGR.leadingIndex === 'function' ? CGR.leadingIndex(item.prompt) : null;
+    const usesIndex = /\{index(?::\d+)?\}/.test(tpl);
+    const index = lead ? lead.index : item.index + 1;
+    const promptText = usesIndex && lead ? String(item.prompt || '').slice(lead.length) : item.prompt;
+    const slug = CGR.slug(promptText, 40);
+    const name = CGR.renderName(tpl, {
+      index,
       slug,
       ext,
       batch: (batch && batch.name) || 'batch'
