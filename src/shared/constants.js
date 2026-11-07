@@ -113,6 +113,8 @@
     folder: 'chatgpt-images',
     batchName: '',
     template: '{index:03}_{slug}',
+    // 一次生成多张图时默认只下载页面上的第一张；'best' 回到旧的「评分最优」策略
+    multiImage: 'first',
     preserveNewlines: false,
     minDelayMs: 3000,
     maxDelayMs: 7000,

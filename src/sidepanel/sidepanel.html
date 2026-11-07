@@ -202,6 +202,15 @@
             <div class="hint">可用：{index}、{index:03}、{slug}、{date}、{time}、{batch}</div>
           </div>
 
+          <div class="field">
+            <label class="lbl" for="multiImage">一次生成多张图时</label>
+            <select id="multiImage" class="input">
+              <option value="first">只下载第一张（默认）</option>
+              <option value="best">下载评分最高的一张（旧行为）</option>
+            </select>
+            <div class="hint">默认按 ChatGPT 页面上的先后顺序，只保存第 1 张，一条任务只产生一个文件；其余图不会下载。旧行为会挑尺寸最大或「4K 高清原图」链接那张。</div>
+          </div>
+
           <div class="field two">
             <div>
               <label class="lbl" for="minDelayMs">间隔下限（秒）</label>

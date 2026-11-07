@@ -231,7 +231,7 @@
         send({
           type: MSG.LOG,
           level: 'info',
-          message: `#${item.index + 1} 检测到 ${n} 个产物（${kinds || 'img'}${res.loose ? '，含宽松规则命中' : ''}），交给后台下载`
+          message: `#${item.index + 1} 检测到 ${n} 个产物（${kinds || 'img'}${res.loose ? '，含宽松规则命中' : ''}），已按页面顺序交给后台，默认只下载第 1 张`
         });
       } else if (res.diagnostic) {
         const d = res.diagnostic;

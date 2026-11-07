@@ -72,7 +72,7 @@
 
       const freshAll = (anchor) => {
         // 统一产物：内嵌 <img>、图片链接、文件附件卡片都在内。
-        // 严格 + 宽松各扫一遍，按 kind+src 去重，严格结果优先。
+        // 严格 + 宽松各扫一遍，按 kind+src 去重，严格结果优先，最后按页面顺序排好。
         const byKey = new Map();
         for (const loose of [false, true]) {
           for (const a of probe.freshArtifacts(before, anchor, loose)) {
@@ -80,7 +80,29 @@
             if (!byKey.has(key)) byKey.set(key, a);
           }
         }
-        return Array.from(byKey.values());
+        return probe.sortByDom(Array.from(byKey.values()));
+      };
+
+      // 「第一张」要跨轮询轮次稳定：图片可能一张张加载、重渲染时还会短暂消失。
+      // 只认最后一轮列表的第一项会把先加载完的第 2/3 张当成第一张。
+      const keyOf = (f) => f.kind + ':' + sigOf(f.src);
+      let firstKey = null;
+      let firstEl = null;
+      let firstArtifact = null;
+
+      /** 上报前的唯一出口：把首图放到第 1 位、重排 order、剥离 DOM 节点。 */
+      const finalArtifacts = (srcs) => {
+        const list = (srcs || []).slice();
+        if (firstKey) {
+          const idx = list.findIndex((f) => keyOf(f) === firstKey);
+          if (idx > 0) list.unshift(list.splice(idx, 1)[0]);
+          else if (idx < 0 && firstArtifact) list.unshift(firstArtifact);
+        }
+        const out = probe.cleanArtifacts(list);
+        out.forEach((f, i) => {
+          if (f && typeof f === 'object') f.order = i;
+        });
+        return out;
       };
 
       const evaluate = () => {
@@ -161,6 +183,22 @@
         // 不需要等满图片的稳定窗口，但依然要等回复结束（避免抓到生成中的占位）。
         const hasFileArtifact = fresh.some((f) => f.kind !== 'img');
         if (fresh.length) {
+          const head = fresh[0];
+          if (!firstEl) {
+            firstKey = keyOf(head);
+            firstEl = head._el || null;
+            firstArtifact = probe.cleanArtifacts([head])[0];
+          } else if (head._el && firstEl && probe.domCmp(head._el, firstEl) < 0) {
+            // 页面上更靠前的图晚到了：它才是「第一张」，不能让先加载完的第二张顶替
+            firstKey = keyOf(head);
+            firstEl = head._el;
+            firstArtifact = probe.cleanArtifacts([head])[0];
+          }
+          // 签名 URL 重渲染后可能变化，首图数据始终取最新一份，避免下载到过期链接
+          if (firstKey) {
+            const cur = fresh.find((f) => keyOf(f) === firstKey);
+            if (cur) firstArtifact = probe.cleanArtifacts([cur])[0];
+          }
           const sig = fresh.map((f) => f.kind + ':' + sigOf(f.src)).sort().join('|');
           if (!candidate) {
             candidate = { sig, srcs: fresh, firstSeenAt: now, lastSeenAt: now, hits: 1, sigChanges: 0 };
@@ -179,17 +217,22 @@
           // 图都稳定 15 秒以上了，就不该再被一个失效的状态选择器拖到超时
           const settledAnyway = !generating && stableFor >= Math.max(15000, stableMs * 5);
           if (candidate.hits >= 2 && stableFor >= requiredStable && (replyEnded || settledAnyway)) {
+            const images = finalArtifacts(candidate.srcs);
             return finish({
               status: 'IMAGE_READY',
-              images: candidate.srcs,
-              loose: candidate.srcs.some((f) => f.loose),
-              kinds: candidate.srcs.map((f) => f.kind),
+              images,
+              loose: images.some((f) => f.loose),
+              kinds: images.map((f) => f.kind),
               sigChanges: candidate.sigChanges
             });
           }
         } else if (candidate && now - candidate.lastSeenAt > 10000) {
-          // 重渲染时图片会短暂消失，别把它当成「没出图」，但也别无限等
+          // 重渲染时图片会短暂消失，别把它当成「没出图」，但也别无限等。
+          // 候选整体作废时首图也要重新判定，否则会一直抱着已经脱离文档的旧节点。
           candidate = null;
+          firstKey = null;
+          firstEl = null;
+          firstArtifact = null;
         }
 
         const sinceEnd = genEndAt ? now - genEndAt : quietFor;
@@ -197,11 +240,12 @@
         // 产物已经出现、回复也结束了，只是稳定条件一直没凑齐：
         // 宽限期一到就按「已出图」交付，绝不能拖到 TIMEOUT 或 NO_IMAGE。
         if (candidate && replyEnded && sinceEnd >= imageGraceMs) {
+          const images = finalArtifacts(candidate.srcs);
           return finish({
             status: 'IMAGE_READY',
-            images: candidate.srcs,
-            loose: candidate.srcs.some((f) => f.loose),
-            kinds: candidate.srcs.map((f) => f.kind),
+            images,
+            loose: images.some((f) => f.loose),
+            kinds: images.map((f) => f.kind),
             sigChanges: candidate.sigChanges,
             phase: 'grace-timeout'
           });
@@ -211,11 +255,12 @@
         if (!fresh.length && !candidate && replyEnded && sinceEnd >= imageGraceMs) {
           const lastLook = freshAll(anchor);
           if (lastLook.length) {
+            const images = finalArtifacts(lastLook);
             return finish({
               status: 'IMAGE_READY',
-              images: lastLook,
-              loose: lastLook.some((f) => f.loose),
-              kinds: lastLook.map((f) => f.kind),
+              images,
+              loose: images.some((f) => f.loose),
+              kinds: images.map((f) => f.kind),
               phase: 'final-loose-scan'
             });
           }

@@ -1056,6 +1056,7 @@
     $('concurrency').value = cfg.concurrency || 1;
     $('folder').value = cfg.folder || 'chatgpt-images';
     $('template').value = cfg.template || '{index:03}_{slug}';
+    $('multiImage').value = cfg.multiImage === 'best' ? 'best' : 'first';
     $('minDelayMs').value = Math.round((cfg.minDelayMs || 3000) / 1000);
     $('maxDelayMs').value = Math.round((cfg.maxDelayMs || 7000) / 1000);
     $('premiseGapMs').value = Math.round((cfg.premiseGapMs || 4000) / 1000);
@@ -1083,6 +1084,7 @@
       concurrency: Math.max(1, Math.min(3, Number($('concurrency').value) || 1)),
       folder: $('folder').value.trim() || 'chatgpt-images',
       template: $('template').value.trim() || '{index:03}_{slug}',
+      multiImage: $('multiImage').value === 'best' ? 'best' : 'first',
       minDelayMs: minSec * 1000,
       maxDelayMs: maxSec * 1000,
       premiseGapMs: Math.max(2, Math.min(30, Number($('premiseGapMs').value) || 4)) * 1000,
@@ -1382,7 +1384,7 @@
     });
 
     // 设置
-    ['mode', 'concurrency', 'folder', 'template', 'minDelayMs', 'maxDelayMs', 'premiseGapMs', 'premiseReplyMs', 'premiseWaitReply', 'timeoutMs', 'maxAttempts', 'onNoImage', 'limitCooldownMin'].forEach((id) => {
+    ['mode', 'concurrency', 'folder', 'template', 'multiImage', 'minDelayMs', 'maxDelayMs', 'premiseGapMs', 'premiseReplyMs', 'premiseWaitReply', 'timeoutMs', 'maxAttempts', 'onNoImage', 'limitCooldownMin'].forEach((id) => {
       const el = $(id);
       if (!el) return;
       el.addEventListener('input', () => {

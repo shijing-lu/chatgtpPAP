@@ -741,9 +741,9 @@
     }
   }
 
-  /** 产物优先级：已知内嵌图 > 高清原图链接 > 宽松内嵌图 > 文件附件卡片。
+  /** 旧策略：已知内嵌图 > 高清原图链接 > 宽松内嵌图 > 文件附件卡片。
    * 「页面里没有 <img>，只有 xxx.png 附件卡片」的场景必须能选出产物。 */
-  function pickArtifact(list) {
+  function bestByScore(list) {
     let best = null;
     let rank = -1;
     for (const a of list) {
@@ -760,6 +760,21 @@
       }
     }
     return best;
+  }
+
+  /** 一次生成多张图时选哪一张下载。
+   *  first（默认）：按页面顺序只取第一张，order 由 probes.sortByDom 写下；
+   *  best：旧的评分策略，可在设置里切回去。
+   * 没有 order 的旧上报数据按「内嵌图优先 + 原顺序」回落，保证附件场景仍能选到可下载产物。
+   * 无论哪种策略，一条任务都只发起一次下载。 */
+  function pickArtifact(list, strategy) {
+    const arr = (list || []).filter((a) => a && a.src);
+    if (!arr.length) return null;
+    if (strategy === 'best') return bestByScore(arr);
+    const ordered = arr.filter((a) => typeof a.order === 'number');
+    if (ordered.length) return ordered.slice().sort((a, b) => a.order - b.order)[0];
+    const weight = (a) => (a.kind === 'img' ? 0 : a.kind === 'link' ? 1 : a.kind === 'card' ? 2 : 3);
+    return arr.slice().sort((a, b) => weight(a) - weight(b))[0];
   }
 
   async function handleLimit(item, raw) {
@@ -870,14 +885,18 @@
 
       if (status === 'IMAGE_READY') {
         const arts = Array.isArray(data.images) ? data.images : [];
-        const best = pickArtifact(arts);
+        const strategy = cfg.multiImage === 'best' ? 'best' : 'first';
+        const best = pickArtifact(arts, strategy);
         if (!best || !best.src) return handleRetryable(item, 'NO_IMAGE', cfg);
 
         const shape = best.kind || 'img';
         const label = best.label ? `「${String(best.label).slice(0, 40)}」` : '';
+        const pickNote = strategy === 'first'
+          ? (arts.length > 1 ? `按页面顺序只下载第 1 张（共 ${arts.length} 张）` : '只有 1 张产物')
+          : '按评分取最优一张（设置里已切换）';
         store.addLog(
           'info',
-          `#${item.index + 1} 已确认出图：${arts.length} 个产物，采用 ${shape} ${label}${best.w ? ` ${best.w}×${best.h}` : ''}${data.loose ? '（含宽松规则命中）' : ''}，开始下载`,
+          `#${item.index + 1} 已确认出图：${arts.length} 个产物，${pickNote}，采用 ${shape} ${label}${best.w ? ` ${best.w}×${best.h}` : ''}${data.loose ? '（含宽松规则命中）' : ''}，开始下载`,
           { index: item.index }
         );
 

@@ -221,6 +221,7 @@
       if (!afterAnchor(afterNode, el)) continue;
       seen.add(key);
       out.push({
+        _el: el,
         src,
         raw,
         w: 0,
@@ -253,6 +254,7 @@
       seen.add(sig);
       const src = href ? absoluteHref(href) : `card:${encodeURIComponent(text.slice(0, 80))}`;
       out.push({
+        _el: el,
         src,
         raw: href,
         w: 0,
@@ -342,6 +344,7 @@
       if (!afterAnchor(afterNode, img)) continue;
       seen.add(key);
       out.push({
+        _el: img,
         src,
         w: img.naturalWidth || 0,
         h: img.naturalHeight || 0,
@@ -352,7 +355,57 @@
     return out;
   }
 
-  /** 统一产物入口：内嵌图 > 图片链接 > 文件卡片。判定层只认这个。 */
+  /* ---------------- 页面顺序 ----------------
+   * 「第一张」必须是页面上最靠前的那张，而不是评分最高或先加载完的那张。
+   * 收集时按类型分批（img / link / card），只有 DOM 节点之间的先后关系能跨类型排序。 */
+
+  // compareDocumentPosition 是反对称的：a 在 b 前时
+  // a.compareDocumentPosition(b) 带 FOLLOWING(4)，b.compareDocumentPosition(a) 带 PRECEDING(2)。
+  // 节点已脱离文档、或测试桩两个方向都返回同一个值时判为「不可比较」，保持原收集顺序。
+  const DOC_FOLLOWING = 4;
+  const DOC_PRECEDING = 2;
+
+  function domCmp(elA, elB) {
+    if (!elA || !elB || elA === elB ||
+        typeof elA.compareDocumentPosition !== 'function' ||
+        typeof elB.compareDocumentPosition !== 'function') return 0;
+    let m1, m2;
+    try {
+      m1 = elA.compareDocumentPosition(elB);
+      m2 = elB.compareDocumentPosition(elA);
+    } catch (e) {
+      return 0;
+    }
+    if ((m1 & DOC_FOLLOWING) && (m2 & DOC_PRECEDING)) return -1; // elA 在前
+    if ((m1 & DOC_PRECEDING) && (m2 & DOC_FOLLOWING)) return 1;  // elA 在后
+    return 0;
+  }
+
+  /** 按页面真实出现顺序排好，并写下 order（0 = 第一张）。
+   * 只比较产物节点，n 通常不超过 10，不必遍历整个 document。 */
+  function sortByDom(list) {
+    const arr = (list || []).slice();
+    arr.sort((x, y) => domCmp(x && x._el, y && y._el));
+    arr.forEach((f, i) => {
+      if (f && typeof f === 'object') f.order = i;
+    });
+    return arr;
+  }
+
+  /** 产物要经 chrome.runtime.sendMessage 的结构化克隆，DOM 节点不能带过去。
+   * 上报前的最后一步必须调用它，否则整条 OUTCOME 会发送失败、任务被退回重发。 */
+  function cleanArtifacts(list) {
+    return (list || []).map((f) => {
+      if (!f || typeof f !== 'object') return f;
+      const out = {};
+      for (const k of Object.keys(f)) {
+        if (k !== '_el') out[k] = f[k];
+      }
+      return out;
+    });
+  }
+
+  /** 统一产物入口：内嵌图 / 图片链接 / 文件卡片，按页面顺序输出。判定层只认这个。 */
   function freshArtifacts(before, afterNode, loose) {
     const out = [];
     const seen = new Set();
@@ -366,7 +419,7 @@
     for (const f of freshImages(before, afterNode, loose)) push(Object.assign({}, f, { kind: 'img', click: false }));
     for (const f of linkArtifacts(before, afterNode, loose)) push(f);
     for (const f of cardArtifacts(before, afterNode, loose)) push(f);
-    return out;
+    return sortByDom(out);
   }
 
   /** 消息节点选择器改版时，仍要靠「新链接 / 新附件卡片 / 正文变长」判断回复已到达 */
@@ -462,6 +515,9 @@
     snapshot,
     freshImages,
     freshArtifacts,
+    sortByDom,
+    cleanArtifacts,
+    domCmp,
     linkArtifacts,
     cardArtifacts,
     findClickTarget,

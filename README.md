@@ -144,6 +144,7 @@
 - **务必关掉 Chrome 设置里的「下载前询问每个文件的保存位置」**，否则每张图都弹一次另存为
 - 文件名模板支持：`{index}`、`{index:03}`、`{slug}`、`{date}`、`{time}`、`{batch}`；中文原样保留
 - **批次名称/下载子目录改完必须点「保存批次设置」**。队列页现在会直接显示「实际保存位置：系统下载目录 / xxx / 001_xxx.png」，有未保存修改也会提示，照着核对即可
+- **一次生成多张图时默认只下载第一张**：产物按页面真实位置排序，取最靠前那张；第一张加载慢或重渲染时短暂消失都不会换图。日志会写「共 N 张，只下载第 1 张」。改这段前先跑 `tests/multi-image.test.js`
 - **文件名不是靠 `downloads.download({filename})` 生效的**：只要扩展注册了 `onDeterminingFilename`（本扩展为了给附件卡片归位必须注册），Chrome 就会忽略传给 `download()` 的 filename（Chromium issue 579563）。所以 `downloads.js` 里维护一张「下载意图表」，三类下载都先登记目标路径，再在同一个监听器里同步 `suggest({filename})` 写回去；表同时写进 storage，SW 冷启动也能恢复。改这段前先跑 `tests/download-filename.test.js`
 
 ## 六、设置项
@@ -156,6 +157,7 @@
 | 会话策略 | **每条新开对话**（推荐）/ 同一对话连续 / 多对话并行。默认每条各开一个对话，所以聊天记录是分散的；想在一个页面里看完「提示词 + 图片」的完整对话流，改成「同一对话连续生成」 |
 | 并行标签页数 | 仅并行模式生效（指单个批次内开几个标签页），默认 1，上限 3 |
 | 基础下载目录 | 全局默认根目录；批次没单独指定目录时用它 + 批次名 |
+| 一次生成多张图时 | **只下载第一张**（默认）：按 ChatGPT 页面上的先后顺序只保存第 1 张，其余不下载，一条任务仍然只产生一个文件。可切回「下载评分最高的一张」（旧行为，会挑尺寸最大或 4K 高清链接那张） |
 | 间隔 | 两条任务之间的随机等待，避免触发风控 |
 | 等前提回复 | 开关，默认开：每条前提都要检测到 ChatGPT 回复写完才发下一条（含第一条和最后一条）。关掉则只按最小间隔放行、不等回复 |
 | 前提最小间隔 | 回复秒回也要补足的硬下限，默认 4 秒，防 ChatGPT 乐观 UI 的假完成 |
@@ -266,9 +268,10 @@ tests/
   version.test.js              版本号与更新记录回归（发版一致性 / 升级 / 重载 / 展示）
   zombie-tab.test.js           僵尸执行页回归（超时自动接管 / 不重复生图 / 当前页优先 / 唤醒失联）
   download-filename.test.js    下载命名与目录回归（意图表 / 自己发起的下载 / 冷启动恢复 / 路径自检）
+  multi-image.test.js          多图只下载第一张回归（页面顺序 / 首图稳定 / 单次下载 / 策略切换）
 ```
 
-十一个测试都是零依赖，直接 `node tests/xxx.test.js`（共 112 组）：
+十二个测试都是零依赖，直接 `node tests/xxx.test.js`（共 122 组）：
 
 - `scheduling.test.js`：真实 store / lease / orchestrator / scheduler + Chrome API 桩，覆盖标签页复用、假运行中、扫描异常、自动重绑、归属丢失、空闲轮询写入、运行期唤醒。
 - `image-detection.test.js`：真实 `probes.js` / `watcher.js` + 可控 DOM 与时钟，覆盖图片 URL 改版、尺寸误杀、签名 URL 变化、图片晚到、停止按钮失效、残留 toast 误报、参考图排除。
@@ -281,6 +284,7 @@ tests/
 - `version.test.js`：真实 `version.js`，强制 `manifest.version` 与 `RELEASES` 最新一条一致（发版漏写更新说明会直接失败），覆盖说明结构、版本倒序、脚本清单引入、首次安装 / 升级 / 同版本重载 / 历史上限 / 展示与复制文本。
 - `zombie-tab.test.js`：真实后台模块 + 可过滤的标签页桩，覆盖「执行页占着绑定却不来领任务」→ 当前页自动接管并清旧绑定、未超时不抢、有任务在生成时不接管、多批次不抢、接管后旧页不会并行领任务、开始优先当前激活页、WAKE 失败标失联、定时扫描清 stale、立即修复改用当前页。
 - `download-filename.test.js`：真实 store / slug / downloads + Chrome API 桩，覆盖批次子目录与模板名、直链与 data URL 下载都登记意图、扩展自己发起的下载也被 `suggest` 改名（旧版在这里退化成「下载.png」）、别的扩展与无关下载不干预、SW 冷启动 `restore()` 与异步恢复、失败/重置清理意图、附件点击归位、落盘路径不符时日志报警。
+- `multi-image.test.js`：真实 `probes.js` / `watcher.js` / 后台 orchestrator + 可控 DOM 与时钟桩，覆盖产物跨类型按页面位置排序、上报前剥离 DOM 节点、4 张图首图正确、第一张晚加载不被顶替、重渲染首图消失仍补回、默认只发起一次下载且下载第一张、切到 `best` 回到旧评分策略、无 `order` 旧数据兼容。
 
 改发送、出图检测或结果处理前请跑对应测试，避免又退回「前提发不出去」或「已出图却判失败 → 重复生图」。
 
@@ -293,6 +297,7 @@ tests/
 5. **前提节奏是「检测到回复写完」事件驱动，不是固定 sleep**：`src/content/premise.js` 是这段逻辑的唯一出处，content.js 只做适配。每条前提（含第一条和最后一条）之后都必须走 `waitForReply()`：回复文字出现 → 生成结束 → 文本稳定，再补足最小间隔；超时只能警告后继续，绝不能重发或把批次置异常。改这里前先跑 `tests/premise-pacing.test.js`。
 6. **「执行页还活着」不能只看 `activeTabs` 里的 `stale:false`**：那只是 storage 里的一个标记，不代表页面真的在领任务。判定要看批次最后一次**真正派发出任务**的时间（`lastClaimAt`）以及有没有 ACTIVE 任务；超过正常间隔且没有任务在生成时才允许换执行页，接管时必须清掉旧绑定，否则会冒出两个执行页并行生图。改这段前先跑 `tests/zombie-tab.test.js`。
 7. **文件名只能由 `onDeterminingFilename` 的 `suggest()` 决定**：因为本扩展注册了这个监听器，`chrome.downloads.download({filename})` 会被 Chrome 忽略（Chromium 579563），`data:` URL 尤其明显。所有下载路径都必须先 `armIntent()` 登记到意图表（内存 + `chrome.storage.local`），监听器对自己发起的下载也要同步 `suggest`；异步从 storage 恢复时监听器必须 `return true`，且 `suggest` 只能调一次。改这段前先跑 `tests/download-filename.test.js`。
+8. **「第一张」由页面 DOM 顺序决定，不由评分或加载速度决定**：`probes.sortByDom()` 给产物写 `order`（0 = 第一张），`watcher.js` 跨轮询轮次锁定首图并保留纯数据副本，上报前必须过 `cleanArtifacts()` 剥离 DOM 节点（否则 `sendMessage` 结构化克隆会失败、任务被退回重发）。后台 `pickArtifact()` 默认只取 `order=0`，`multiImage='best'` 才回到评分策略；两种策略下一条任务都只发起一次下载。改这段前先跑 `tests/multi-image.test.js`。
 
 ## 十、版本与发版规范
 
