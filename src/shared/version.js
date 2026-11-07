@@ -19,6 +19,17 @@
    * 最新一条必须与 manifest.version 相同（tests/version.test.js 会强校验）。 */
   const RELEASES = [
     {
+      version: '0.5.2',
+      date: '2026-11-07',
+      title: '修复下载变成「下载.png」且不进批次目录',
+      changes: [
+        '根因：扩展自己注册 onDeterminingFilename 后，Chrome 会忽略 downloads.download() 传入的 filename（Chromium 579563）；旧监听器又跳过扩展自己发起的下载，导致直链/取流下载全部落到默认下载目录',
+        '新增下载意图表：直链、页面取流、附件点击三类下载都先登记批次目录与模板名，再由监听器同步写回文件名；SW 冷启动可从存储恢复',
+        '队列页新增「实际保存位置」提示，直接显示最终目录与示例文件名；落盘路径不符时日志会明确报出实际路径',
+        '附件点击把目标文件名写入 download 属性作为二级兜底；一键重置同时清理残留下载意图'
+      ]
+    },
+    {
       version: '0.5.1',
       date: '2026-11-07',
       title: '修复「已接管标签页却一直等待派发」',

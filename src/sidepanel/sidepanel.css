@@ -393,6 +393,16 @@ textarea {
   border-radius: 4px;
 }
 
+.hint.save-path {
+  margin-top: 8px;
+  padding: 6px 9px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-soft);
+  word-break: break-all;
+}
+
 /* ---------- progress ---------- */
 .progress-wrap {
   display: flex;

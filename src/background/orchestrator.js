@@ -458,10 +458,12 @@
       }
       for (const id of touched) await tabs.send(id, { type: CGR.MSG.ABORT });
 
-      // ② 内存里的辅助状态也要清，否则残留的下载映射 / 失联计数会立刻把旧状态「复活」
+      // ② 内存里的辅助状态也要清，否则残留的下载映射 / 失联计数会立刻把旧状态「复活」。
+      //    下载意图表连 storage 一起清，避免重置后旧路径劫持下一次下载的文件名。
       sendFailStreak = 0;
       try {
-        dl.clearCache();
+        if (dl.purge) dl.purge();
+        else dl.clearCache();
       } catch (e) {
         /* ignore */
       }

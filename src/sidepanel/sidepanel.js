@@ -131,6 +131,7 @@
       $('batchNameInput').disabled = true;
       $('batchFolderInput').disabled = true;
       $('btnSaveBatch').disabled = true;
+      $('batchPathHint').textContent = '';
       return;
     }
     $('batchNameInput').disabled = false;
@@ -146,6 +147,21 @@
       $('batchFolderInput').value = c.folder || '';
       $('batchFolderInput').placeholder = `留空=基础目录/${c.name || '批次名'}`;
     }
+
+    // 直接把最终落盘路径算给用户看：目录没生效 / 没点保存时一眼就能发现
+    const cfg = v.cfg || {};
+    const base = CGR.normalizeFolder(cfg.folder || 'chatgpt-images', 'chatgpt-images');
+    const own = c.folder ? CGR.normalizeFolder(c.folder, '') : '';
+    const dir = own || (c.name ? `${base}/${CGR.normalizeFolder(c.name, '')}` : base);
+    const sample = CGR.renderName(cfg.template || '{index:03}_{slug}', {
+      index: 1,
+      slug: '示例提示词',
+      batch: c.name || '批次',
+      ext: 'png'
+    });
+    $('batchPathHint').textContent =
+      `实际保存位置：系统下载目录 / ${dir} / ${sample}.png` +
+      (batchDirty ? '（目录或名称有未保存修改，请点「保存批次设置」）' : '');
   }
 
   function renderProgress(v) {

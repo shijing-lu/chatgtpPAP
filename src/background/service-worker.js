@@ -27,6 +27,9 @@ const S = CGR.STATUS;
 /* ---------------- 启动 ---------------- */
 
 async function boot() {
+  // 下载意图表可能被 SW 冷启动清空，先读回内存；否则 onDeterminingFilename 会把
+  // 我们自己的下载当成「无关下载」放行，文件又变成默认「下载.png」落到下载根目录。
+  await dl.restore();
   await store.load();
   await store.withLock(async () => {
     await lease.sweepExpired();
@@ -453,19 +456,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 /* ---------------- 浏览器事件 ---------------- */
 
-/* 页面点击附件卡片产生的下载不属于扩展，必须在这里改文件名并登记归属，
- * 否则文件会落到 Chrome 默认下载目录、任务也永远停在「下载中」。
- * 这个监听器必须在 service worker 顶层同步注册，且同步调用 suggest()。 */
+/* 只要注册了 onDeterminingFilename，Chrome 就会忽略 downloads.download({filename})
+ * （Chromium issue 579563），所以扩展自己发起的 A/B 级下载也必须在这里把目标路径
+ * suggest 回去；页面点击产生的 C 级下载同样在这里归位。
+ * 监听器必须在 service worker 顶层同步注册；返回 true 表示稍后异步调用 suggest。 */
 if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
   chrome.downloads.onDeterminingFilename.addListener((d, suggest) => {
     try {
-      dl.onDeterminingFilename(d, suggest);
+      return dl.onDeterminingFilename(d, suggest);
     } catch (e) {
       try {
         suggest();
       } catch (e2) {
         /* ignore */
       }
+      return false;
     }
   });
 }

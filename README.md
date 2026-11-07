@@ -143,6 +143,8 @@
 - **只能写到「下载目录」下面**。Chrome 扩展无权写入 `D://我的图//` 这种绝对路径
 - **务必关掉 Chrome 设置里的「下载前询问每个文件的保存位置」**，否则每张图都弹一次另存为
 - 文件名模板支持：`{index}`、`{index:03}`、`{slug}`、`{date}`、`{time}`、`{batch}`；中文原样保留
+- **批次名称/下载子目录改完必须点「保存批次设置」**。队列页现在会直接显示「实际保存位置：系统下载目录 / xxx / 001_xxx.png」，有未保存修改也会提示，照着核对即可
+- **文件名不是靠 `downloads.download({filename})` 生效的**：只要扩展注册了 `onDeterminingFilename`（本扩展为了给附件卡片归位必须注册），Chrome 就会忽略传给 `download()` 的 filename（Chromium issue 579563）。所以 `downloads.js` 里维护一张「下载意图表」，三类下载都先登记目标路径，再在同一个监听器里同步 `suggest({filename})` 写回去；表同时写进 storage，SW 冷启动也能恢复。改这段前先跑 `tests/download-filename.test.js`
 
 ## 六、设置项
 
@@ -208,6 +210,7 @@
 | 提示「连续发送失败」 | 先看日志里的「发送诊断」那几行，按上面的细分原因判断；确认是选择器失效时改 `selectors.js` 里的 `composer` / `sendButton` / `stopButton`。批次现在只会**暂停**，点「继续」即可恢复，不用重建 |
 | **网页已经生成了图，却显示「生成失败」，还反复生成好几张** | 见下方「出图识别失败」小节。根因是旧版靠 3 条图片 URL 白名单 + `naturalWidth≥200` 判图，ChatGPT 换了图片域名/用 blob/data URL 或图片晚于判定插入就全漏；加上租约过期回收不计数，`maxAttempts` 永远不触发，同一条能被无限次重发。现已全部修复 |
 | **ChatGPT 给的是「xxx.png 图像」附件卡片 / 「查看 4K 高清原图」，日志却是 `img 4 / 新增 0 / 规则命中 0`** | 这不是没出图，是**产物形态不同**：页面上根本没有新增 `<img>`，旧版只扫图片必然判「未出图」。现在「链接 / 附件卡片」也算产物，日志会写成 `检测到 N 个产物（link/card）`；下载按 `http(s) 直链 → 页面内取流 → 点击附件并把下载归位到批次目录` 三级走。跑一次自检，看「文件产物识别」那一项是否大于 0 |
+| **下载下来叫「下载.png」「下载 (1).png」，而且没进批次目录** | 这是 Chrome 的默认文件名，说明目标路径没写回去。旧版根因：扩展自己注册了 `onDeterminingFilename`，Chrome 因此忽略 `download({filename})`，而旧监听器又跳过扩展自己发起的下载。0.5.2 起用「下载意图表」统一归位，日志会出现 `#N 下载已归位 → 批次目录/001_xxx.png`；若仍不对，日志会有「实际落盘路径与设定不一致」并打印真实路径。另外确认 Chrome 没开「下载前询问每个文件的保存位置」、批次设置已点「保存批次设置」、以及没有其它下载管理类扩展在抢文件名 |
 | 出图了但没下载 | 看日志有没有 `#N 已确认出图…开始下载` 和 `#N 已发起下载（直链 A / 数据 B，id=…）→ 路径`。有「已确认出图」但没「已发起下载」= 下载 API 调用失败或走的是附件点击链路（看 `#N 页面附件下载已归位 → 路径`）；两条都没有 = 根本没检测到图，按上一行排查。若出现 `附件点击未产生下载`，说明 ChatGPT 点卡片后只打开预览没触发下载，此时该条会标「待确认」，请手动保存那张图。也可查下载目录是否有同名/权限限制 |
 | 高级任务提示「参考图附加失败」 | ChatGPT 的 file input 还没就绪或上传超时；看日志里的 reason，`no-file-input` 说明选择器要更新（`selectors.js`） |
 | 卡在「生成中」很久 | 图生成本身慢，等出图期间每 30 秒会写一条进度日志；超时后默认标「待确认」，不会再自动重发提示词 |
@@ -240,7 +243,7 @@ src/background/
   store.js                     storage 单写者 + withLock 串行锁 + 视图发布
   orchestrator.js              队列推进、全局状态机、结果处理
   lease.js                     租约签发 / 续租 / 回收（防两个标签页抢同一条）
-  downloads.js                 直链 / 页面取流 / 附件点击归位 + 下载状态推进
+  downloads.js                 ★ 下载意图表（目标路径登记 / SW 冷启动恢复）+ 直链 / 页面取流 / 附件点击归位 + 下载状态推进
   tabpool.js                   标签页池（串行复用 / 并行独立窗口）
   scheduler.js                 每 30 秒扫描：心跳、续租、限额恢复
 src/content/
@@ -262,9 +265,10 @@ tests/
   attachment-download.test.js  附件下载归位与结果护栏回归（真实 downloads 模块）
   version.test.js              版本号与更新记录回归（发版一致性 / 升级 / 重载 / 展示）
   zombie-tab.test.js           僵尸执行页回归（超时自动接管 / 不重复生图 / 当前页优先 / 唤醒失联）
+  download-filename.test.js    下载命名与目录回归（意图表 / 自己发起的下载 / 冷启动恢复 / 路径自检）
 ```
 
-十个测试都是零依赖，直接 `node tests/xxx.test.js`（共 98 组）：
+十一个测试都是零依赖，直接 `node tests/xxx.test.js`（共 112 组）：
 
 - `scheduling.test.js`：真实 store / lease / orchestrator / scheduler + Chrome API 桩，覆盖标签页复用、假运行中、扫描异常、自动重绑、归属丢失、空闲轮询写入、运行期唤醒。
 - `image-detection.test.js`：真实 `probes.js` / `watcher.js` + 可控 DOM 与时钟，覆盖图片 URL 改版、尺寸误杀、签名 URL 变化、图片晚到、停止按钮失效、残留 toast 误报、参考图排除。
@@ -276,6 +280,7 @@ tests/
 - `attachment-download.test.js`：真实 store / lease / downloads / orchestrator，覆盖卡片取流与点击、`onDeterminingFilename` 归位到批次目录、下载完成推进为已完成、http 直链仍走 A、已有产物时 NO_IMAGE 不重发、点击超时收敛。
 - `version.test.js`：真实 `version.js`，强制 `manifest.version` 与 `RELEASES` 最新一条一致（发版漏写更新说明会直接失败），覆盖说明结构、版本倒序、脚本清单引入、首次安装 / 升级 / 同版本重载 / 历史上限 / 展示与复制文本。
 - `zombie-tab.test.js`：真实后台模块 + 可过滤的标签页桩，覆盖「执行页占着绑定却不来领任务」→ 当前页自动接管并清旧绑定、未超时不抢、有任务在生成时不接管、多批次不抢、接管后旧页不会并行领任务、开始优先当前激活页、WAKE 失败标失联、定时扫描清 stale、立即修复改用当前页。
+- `download-filename.test.js`：真实 store / slug / downloads + Chrome API 桩，覆盖批次子目录与模板名、直链与 data URL 下载都登记意图、扩展自己发起的下载也被 `suggest` 改名（旧版在这里退化成「下载.png」）、别的扩展与无关下载不干预、SW 冷启动 `restore()` 与异步恢复、失败/重置清理意图、附件点击归位、落盘路径不符时日志报警。
 
 改发送、出图检测或结果处理前请跑对应测试，避免又退回「前提发不出去」或「已出图却判失败 → 重复生图」。
 
@@ -287,6 +292,7 @@ tests/
 4. **图片快照在前提之后、正式提示词之前拍**：所以前提阶段即使出了图也会被差集排除掉，不会被误当成结果下载。
 5. **前提节奏是「检测到回复写完」事件驱动，不是固定 sleep**：`src/content/premise.js` 是这段逻辑的唯一出处，content.js 只做适配。每条前提（含第一条和最后一条）之后都必须走 `waitForReply()`：回复文字出现 → 生成结束 → 文本稳定，再补足最小间隔；超时只能警告后继续，绝不能重发或把批次置异常。改这里前先跑 `tests/premise-pacing.test.js`。
 6. **「执行页还活着」不能只看 `activeTabs` 里的 `stale:false`**：那只是 storage 里的一个标记，不代表页面真的在领任务。判定要看批次最后一次**真正派发出任务**的时间（`lastClaimAt`）以及有没有 ACTIVE 任务；超过正常间隔且没有任务在生成时才允许换执行页，接管时必须清掉旧绑定，否则会冒出两个执行页并行生图。改这段前先跑 `tests/zombie-tab.test.js`。
+7. **文件名只能由 `onDeterminingFilename` 的 `suggest()` 决定**：因为本扩展注册了这个监听器，`chrome.downloads.download({filename})` 会被 Chrome 忽略（Chromium 579563），`data:` URL 尤其明显。所有下载路径都必须先 `armIntent()` 登记到意图表（内存 + `chrome.storage.local`），监听器对自己发起的下载也要同步 `suggest`；异步从 storage 恢复时监听器必须 `return true`，且 `suggest` 只能调一次。改这段前先跑 `tests/download-filename.test.js`。
 
 ## 十、版本与发版规范
 

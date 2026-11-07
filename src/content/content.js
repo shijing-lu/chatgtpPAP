@@ -380,8 +380,10 @@
   }
 
   /** 让 ChatGPT 自己下载附件文件。绝不点「查看原图」这类 http 外链：
-   * 那会在当前页导航或开新标签页，用户明确不允许。sandbox: / 卡片按钮才走这里。 */
-  function clickAttachment(src, label) {
+   * 那会在当前页导航或开新标签页，用户明确不允许。sandbox: / 卡片按钮才走这里。
+   * filename 是批次目录/命名模板算好的目标名：即使后台归位监听器失效，
+   * download 属性至少能让文件带上正确名字，而不是 Chrome 默认的「下载.png」。 */
+  function clickAttachment(src, label, filename) {
     if (/^https?:\/\//i.test(src || '')) return false;
     const el = probe.findClickTarget(src, label);
     if (!el || !el.click) return false;
@@ -389,7 +391,12 @@
       if (el.setAttribute) {
         el.setAttribute('target', '_self');
         // 让 <a> 走下载而不是预览/导航；对 button 无副作用
-        if (el.tagName === 'A' && !(el.hasAttribute && el.hasAttribute('download'))) el.setAttribute('download', '');
+        if (el.tagName === 'A') {
+          const wanted = String(filename || '').split('/').pop();
+          if (!(el.hasAttribute && el.hasAttribute('download')) || wanted) {
+            el.setAttribute('download', wanted || '');
+          }
+        }
       }
       el.click();
       return true;
@@ -412,7 +419,7 @@
         mime = blob.type || mime;
         dataUrl = await blobToDataUrl(blob);
       } catch (e) {
-        if (detail.click && clickAttachment(src, detail.label)) {
+        if (detail.click && clickAttachment(src, detail.label, detail.filename)) {
           send({
             type: MSG.LOG,
             level: 'info',
@@ -476,6 +483,7 @@
         fetchAndUpload(msg.index, msg.src, msg.batchId, {
           label: msg.label,
           kind: msg.kind,
+          filename: msg.filename,
           click: msg.click
         });
         sendResponse({ ok: true });
